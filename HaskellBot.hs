@@ -50,7 +50,6 @@ main = bracket connect disconnect loop
       loop st    = catch (runReaderT run st) (\(e :: IOException) -> return ()) 
 
 messages  = unsafePerformIO (newMVar [])
-lastFeeds = unsafePerformIO (newMVar []) 
 
 connect :: IO Bot
 connect = notify $ do
@@ -62,7 +61,7 @@ connect = notify $ do
         return (Bot h t)
     where
         spawnFeedProc h fs = do
-                            fm <- (newMVar [])
+                            fm <- newEmptyMVar
                             forkIO $ updateFeed h 50000000 fs fm 
         notify a = bracket_
             (printf "Connecting to %s ... " server >> hFlush stdout)
@@ -71,26 +70,26 @@ connect = notify $ do
 
 dispatchMessages h d = do
             m <- takeMVar messages  
-            hPutStrLn h $ "PRIVMSG " ++ m
+            hPutStrLn h $ "PRgIVMSG " ++ m
             putStrLn $ "PRIVMSG " ++ m
             threadDelay d
             dispatchMessages h d
 
 updateFeed h d fs fm = do
     fd <- getFeedData fs
-    e  <- isEmptyMVar fm
-    case e of
-        True   -> do
-                    putMVar fm fd
-                    updateFeed h d fs fm
-        False -> do
-                    lfd <- takeMVar fm 
-                    writeFeedData h (fd \\ lfd)
-                    putStrLn $ "Updating Feed: " ++ (feedName fs)
-                    putMVar fm fd
-                    threadDelay d
-                    updateFeed h d fs fm
-                
+    lfd <- tryTakeMVar fm 
+    putStrLn $ "Updating Feed: " ++ (feedName fs)
+    case lfd of
+        Nothing  -> waitAndRecur fd
+        Just a   -> do
+                        writeFeedData h (a \\ fd)
+                        waitAndRecur fd
+    where
+        waitAndRecur fd = do 
+                            putStrLn "Waiting"
+                            putMVar fm fd
+                            threadDelay d
+                            updateFeed h d fs fm
                 
 addMessage m = putMVar messages m
 
