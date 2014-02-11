@@ -23,7 +23,7 @@ import FeedParser
 server      = "irc.freenode.org"
 port        = 6667
 ircChannel  = "##hb-testing"
-nick        = "HaskellDevBot"
+nick        = "GamedevBotT"
 master      = "DrAwesomeClaws"
 admins      = master : ["DrAwesomeClaws_"]
 feeds       =   [
@@ -70,7 +70,7 @@ connect = notify $ do
 
 dispatchMessages h d = do
             m <- takeMVar messages  
-            hPutStrLn h $ "PRgIVMSG " ++ m
+            hPutStrLn h $ "PRIVMSG " ++ m
             putStrLn $ "PRIVMSG " ++ m
             threadDelay d
             dispatchMessages h d
@@ -81,10 +81,11 @@ updateFeed h d fs fm = do
     putStrLn $ "Updating Feed: " ++ (feedName fs)
     case lfd of
         Nothing  -> waitAndRecur fd
-        Just a   -> do
-                        writeFeedData h (a \\ fd)
+        Just od  -> do
+                        writeFeedData h $ (getNewItems od fd)
                         waitAndRecur fd
     where
+        getNewItems od fd = ((\a -> not $ a `elem` od) `filter` fd)
         waitAndRecur fd = do 
                             putStrLn "Waiting"
                             putMVar fm fd
@@ -98,7 +99,7 @@ run = do
     setNick     nick
     setUser     (nick++" 0 * :haskelldev bot")
     joinChannel ircChannel
-    asks socket >>= listen
+    asks socket >>= listen 
 
 write :: String -> String -> Net ()
 write s t = do
@@ -143,10 +144,10 @@ eval x =
         cmdIs t      = isBotCmd && t `isPrefixOf` botCmd
         sayCmd       = if isAdmin then say else ret 
         quitCmd      = if isAdmin then quitIrc else ret
-        uptimeCmd    = (uptime >>= privmsg)
+        uptimeCmd    = uptime >>= privmsg
         say          = privmsgTo ircChannel $ drop 4 botCmd
         isAdmin      = ircUser `elem` admins 
-        ret          = return ()
+        ret          = io $ return ()
                                         
 uptime :: Net String
 uptime = do
@@ -168,10 +169,10 @@ prettytime td =
 writeFeedData h f = do
         writeItem `mapM` f
     where 
-        writeItem x = addMessage $ ircChannel ++ " : [" ++ name x ++ "] " ++ text x ++ " <" ++ url x ++ ">"
+        writeItem x = addMessage $ "PRIVMSG " ++ ircChannel ++ " : " ++ name x ++ ": " ++ text x ++ " <" ++ url x ++ ">"
         name x = (feedName (feedItemSource x))
         text x = (feedItemName x)
-        url  x = (feedItemUrl x)
+        url  x = take 48 (feedItemUrl x) 
 
 quitIrc :: Net ()
 quitIrc = write "QUIT" ":Exiting" >> io (exitWith ExitSuccess)
