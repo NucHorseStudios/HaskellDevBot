@@ -46,23 +46,26 @@ getFeedData fs =
             name  = (feedName fs) 
 
 data FeedItem = 
-     FeedItem {     itemTitle :: String,
-                    itemUrl   :: String
+     FeedItem {     
+        itemTitle   :: String,
+        itemPubDate :: String,
+        itemUrl     :: String
      }
      deriving (Eq, Show, Read)
 
 data Feed = 
      Feed { 
-            channelTitle :: String,
-            feedItems :: [FeedItem]
+        channelTitle :: String,
+        feedItems    :: [FeedItem]
     }
     deriving (Eq, Show, Read)
 
 itemToFeedData :: FeedSource -> FeedItem -> FeedData
 itemToFeedData fs item =
     FeedData {
-        feedItemName    = itemTitle item,
+        feedItemTitle   = itemTitle item,
         feedItemSource  = fs,
+        feedItemPubDate = itemPubDate item,
         feedItemUrl     = itemUrl item  
     }
 
@@ -91,18 +94,18 @@ getTitle doc =
 getEnclosures doc =
     map procFeedItem $ getFeedItems doc
     where
+        getFeedItems      = channel /> tag "item" 
         procFeedItem item =
              FeedItem {
-                itemTitle = title,
-                itemUrl   = link
+                itemTitle   = title,
+                itemUrl     = link,
+                itemPubDate = pubDate
             }
             where 
-                title = contentToStringDefault "Untitled FeedData"
-                        (keep /> tag "title" /> txt $ item)
-                
-                link  = contentToString (keep /> tag "link"  /> txt $ item)
-
-        getFeedItems      = channel /> tag "item"
+                title   = contentToStringDefault "Untitled FeedData"
+                          (keep /> tag "title" /> txt $ item)
+                link    = contentToString (keep /> tag "guid"  /> txt $ item)
+                pubDate = contentToString (keep /> tag "pubDate" /> txt $ item)
 
 contentToStringDefault msg [] = msg
 contentToStringDefault _   x  = contentToString x

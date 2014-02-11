@@ -17,6 +17,11 @@ import Data.List
 import Data.List.Split
 import Data.List.Utils
 import Data.Char
+import Data.Time
+import Data.Time.Parse
+import Data.Convertible (convert)
+import System.Posix.Types (EpochTime(..))
+import Data.Time.Clock (UTCTime(..))
 import FeedTypes
 import FeedParser
 
@@ -28,16 +33,19 @@ master      = "DrAwesomeClaws"
 admins      = master : ["DrAwesomeClaws_"]
 feeds       =   [
                     FeedSource { 
-                        feedName = "r/gamedev", 
-                        feedUrl  = "http://www.reddit.com/r/gamedev/new/.rss"
+                        feedName        = "r/gamedev", 
+                        feedRefreshTime = 30,
+                        feedUrl         = "http://www.reddit.com/r/gamedev/new/.rss"
                     },
                     FeedSource {
-                        feedName = "r/truegamedev",
-                        feedUrl  = "http://www.reddit.com/r/truegamedev/new/.rss"
+                        feedName        = "r/truegamedev",
+                        feedRefreshTime = 30, 
+                        feedUrl         = "http://www.reddit.com/r/truegamedev/new/.rss"
                     },
                     FeedSource {
-                        feedName = "r/gamedevbottesting",
-                        feedUrl  = "http://www.reddit.com/r/gamedevbottesting/new/.rss"
+                        feedName        = "r/gamedevbottesting",
+                        feedRefreshTime = 10, 
+                        feedUrl         = "http://www.reddit.com/r/gamedevbottesting/new/.rss"
                     }
                 ]
 data Bot = Bot { 
@@ -48,10 +56,10 @@ data Bot = Bot {
 type Net = ReaderT Bot IO
 
 main :: IO ()
-main = bracket connect disconnect loop
-  where
-      disconnect = hClose . socket
-      loop st    = catch (runReaderT run st) (\(e :: IOException) -> return ()) 
+main =  bracket connect disconnect loop
+        where
+            disconnect = hClose . socket
+            loop st    = catch (runReaderT run st) (\(e :: IOException) -> return ()) 
 
 messages  = unsafePerformIO (newMVar [])
 
@@ -66,7 +74,7 @@ connect = notify $ do
     where
         spawnFeedProc h fs = do
                             fm <- newEmptyMVar
-                            forkIO $ updateFeed h 50000000 fs fm 
+                            forkIO $ updateFeed h ((feedRefreshTime fs) * 1000000) fs fm 
         notify a = bracket_
             (printf "Connecting to %s ... " server >> hFlush stdout)
             (putStrLn "done.")
@@ -89,7 +97,28 @@ updateFeed h d fs fm = do
                         writeFeedData h $ (getNewItems od fd)
                         waitAndRecur fd
     where
-        getNewItems od fd = ((\a -> not $ a `elem` od) `filter` fd)
+        getNewItems od fd = ((notInOldData od) `filter` fd)
+        notInOldData od a = unsafePerformIO $ do
+                                new      <- (notOlderThan a 3600)
+                                return $ (not $ a `elem` od) && new
+        notOlderThan a  s = case gzt (cvtDate (feedItemPubDate a)) of
+                                Left  _   -> return False
+                                Right t   -> do
+                                                putStrLn $ show $ utcTimeToEpochTime t
+                                                return $ ageSeconds < s 
+                                            where 
+                                                cEpoch = (utcTimeToEpochTime $ unsafePerformIO getCurrentTime)
+                                                pEpoch = (utcTimeToEpochTime t) 
+                                                ageSeconds = cEpoch - pEpoch
+
+                            where  
+                                gzt cd = case cd of 
+                                            Nothing   -> Left  $ False 
+                                            Just   lt -> Right $ cvtToUtc lt
+                                
+                                cvtToUtc t = localTimeToUTC utc $ fst t
+        
+        cvtDate dt        = (strptime "%a, %Od %b %Y %OH:%OM:%OS %z" dt)
         waitAndRecur fd = do 
                             putStrLn "Waiting"
                             putMVar fm fd
@@ -97,6 +126,9 @@ updateFeed h d fs fm = do
                             updateFeed h d fs fm
                 
 addMessage m = putMVar messages m
+
+utcTimeToEpochTime :: UTCTime -> EpochTime
+utcTimeToEpochTime = convert
 
 run :: Net ()
 run = do
@@ -126,31 +158,31 @@ io = liftIO
 listen :: Handle -> Net ()
 listen h = forever $ do
         s <- init `fmap` io (hGetLine h)
-        --io $ putStrLn s
+        io $ putStrLn s
         eval s
 
 eval :: String -> Net ()
-eval x = do 
-            if      ping                then pong
-            else case cmdIs of
-                "!quit"     -> quitCmd
-                "!say"      -> sayCmd
-                "!uptime"   -> uptimeCmd 
-                _           -> ret
+eval x =  
+        if      ping                then pong
+        else case cmdIs of
+        "!quit"     -> quitCmd
+        "!say"      -> sayCmd
+        "!uptime"   -> uptimeCmd 
+        _           -> ret
     where
         ping         = "PING :" `isPrefixOf` x
         pong         = write "PONG" (':' : drop 6 x)
         parseIrcCmd  = head (splitOn "!" x) : tail (splitOn " " x)
         clean        = drop 1 . dropWhile (/= ':') . drop 1
         ircUser      = drop 1 $ parseIrcCmd !! 0
-        ircChannel   = parseIrcCmd !! 2 
+        chan         = if ((parseIrcCmd !! 2) == nick) then ircUser else (parseIrcCmd !! 2) 
         botCmd       = clean x
         isBotCmd     = (length botCmd) > 0 && (botCmd !! 0) == '!'
         cmdIs        = if (not $ null (words botCmd)) then (words botCmd !! 0) else ""
         sayCmd       = if isAdmin then say else ret 
         quitCmd      = if isAdmin then quitIrc else ret
-        uptimeCmd    = uptime >>= privmsg
-        say          = privmsgTo ircChannel $ drop 4 botCmd
+        uptimeCmd    = uptime >>= (privmsgTo chan)
+        say          = privmsgTo chan $ drop 4 botCmd
         isAdmin      = ircUser `elem` admins 
         ret          = io $ return ()
                                         
@@ -175,9 +207,9 @@ writeFeedData h f = do
         writeItem `mapM` f
     where 
         writeItem x = addMessage $ ircChannel ++ " : " ++ name x ++ ": " ++ text x ++ " <" ++ url x ++ ">"
-        name x = (feedName (feedItemSource x))
-        text x = (feedItemName x)
-        url  x = take (39 + (length $ name x)) (feedItemUrl x) 
+        name x      = (feedName (feedItemSource x))
+        text x      = (feedItemTitle x)
+        url  x      = take (39 + (length $ name x)) (feedItemUrl x) 
 
 quitIrc :: Net ()
 quitIrc = write "QUIT" ":Exiting" >> io (exitWith ExitSuccess)
