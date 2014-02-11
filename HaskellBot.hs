@@ -34,6 +34,10 @@ feeds       =   [
                     FeedSource {
                         feedName = "r/truegamedev",
                         feedUrl  = "http://www.reddit.com/r/truegamedev/new/.rss"
+                    },
+                    FeedSource {
+                        feedName = "r/gamedevbottesting",
+                        feedUrl  = "http://www.reddit.com/r/gamedevbottesting/new/.rss"
                     }
                 ]
 data Bot = Bot { 
@@ -122,16 +126,17 @@ io = liftIO
 listen :: Handle -> Net ()
 listen h = forever $ do
         s <- init `fmap` io (hGetLine h)
-        io $ putStrLn s
+        --io $ putStrLn s
         eval s
 
 eval :: String -> Net ()
-eval x = 
-         if      ping                then pong
-         else if cmdIs "!quit"       then quitCmd
-         else if cmdIs "!say"        then sayCmd
-         else if cmdIs "!uptime"     then uptimeCmd 
-         else    ret
+eval x = do 
+            if      ping                then pong
+            else case cmdIs of
+                "!quit"     -> quitCmd
+                "!say"      -> sayCmd
+                "!uptime"   -> uptimeCmd 
+                _           -> ret
     where
         ping         = "PING :" `isPrefixOf` x
         pong         = write "PONG" (':' : drop 6 x)
@@ -141,7 +146,7 @@ eval x =
         ircChannel   = parseIrcCmd !! 2 
         botCmd       = clean x
         isBotCmd     = (length botCmd) > 0 && (botCmd !! 0) == '!'
-        cmdIs t      = isBotCmd && t `isPrefixOf` botCmd
+        cmdIs        = if (not $ null (words botCmd)) then (words botCmd !! 0) else ""
         sayCmd       = if isAdmin then say else ret 
         quitCmd      = if isAdmin then quitIrc else ret
         uptimeCmd    = uptime >>= privmsg
@@ -169,10 +174,10 @@ prettytime td =
 writeFeedData h f = do
         writeItem `mapM` f
     where 
-        writeItem x = addMessage $ "PRIVMSG " ++ ircChannel ++ " : " ++ name x ++ ": " ++ text x ++ " <" ++ url x ++ ">"
+        writeItem x = addMessage $ ircChannel ++ " : " ++ name x ++ ": " ++ text x ++ " <" ++ url x ++ ">"
         name x = (feedName (feedItemSource x))
         text x = (feedItemName x)
-        url  x = take 48 (feedItemUrl x) 
+        url  x = take (39 + (length $ name x)) (feedItemUrl x) 
 
 quitIrc :: Net ()
 quitIrc = write "QUIT" ":Exiting" >> io (exitWith ExitSuccess)

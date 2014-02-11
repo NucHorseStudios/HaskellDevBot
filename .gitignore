@@ -3,6 +3,6 @@ cabal-dev
 *.o
 *.hi
 *.chi
-*.swp
+*.sw*
 *.chs.h
 .virthualenv
