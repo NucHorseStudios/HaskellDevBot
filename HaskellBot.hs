@@ -61,7 +61,8 @@ main =  bracket connect disconnect loop
             disconnect = hClose . socket
             loop st    = catch (runReaderT run st) (\(e :: IOException) -> return ()) 
 
-messages  = unsafePerformIO (newMVar [])
+messages     = unsafePerformIO (newMVar [])
+addMessage m = putMVar messages m
 
 connect :: IO Bot
 connect = notify $ do
@@ -87,49 +88,35 @@ dispatchMessages h d = do
             threadDelay d
             dispatchMessages h d
 
+isBefore :: Int -> UTCTime -> UTCTime -> Bool
+isBefore i a b = (fromEnum $ (utcTimeToEpochTime a) - (utcTimeToEpochTime b)) < i
+
+utcTimeToEpochTime :: UTCTime -> EpochTime
+utcTimeToEpochTime = convert
+
 updateFeed h d fs fm = do
     fd <- getFeedData fs
     lfd <- tryTakeMVar fm 
     putStrLn $ "Updating Feed: " ++ (feedName fs)
     case lfd of
         Nothing  -> waitAndRecur fd
-        Just od  -> do
-                        writeFeedData h $ (getNewItems od fd)
-                        waitAndRecur fd
+        Just od  -> writeFeedData h (getNewItems od fd) >> waitAndRecur fd
     where
-        getNewItems od fd = ((notInOldData od) `filter` fd)
-        notInOldData od a = unsafePerformIO $ do
-                                new      <- (notOlderThan a 3600)
-                                return $ (not $ a `elem` od) && new
-        notOlderThan a  s = case gzt (cvtDate (feedItemPubDate a)) of
-                                Left  _   -> return False
-                                Right t   -> do
-                                                putStrLn $ show $ utcTimeToEpochTime t
-                                                return $ ageSeconds < s 
-                                            where 
-                                                cEpoch = (utcTimeToEpochTime $ unsafePerformIO getCurrentTime)
-                                                pEpoch = (utcTimeToEpochTime t) 
-                                                ageSeconds = cEpoch - pEpoch
-
-                            where  
-                                gzt cd = case cd of 
-                                            Nothing   -> Left  $ False 
-                                            Just   lt -> Right $ cvtToUtc lt
-                                
-                                cvtToUtc t = localTimeToUTC utc $ fst t
+        getNewItems  od fd = ((notOlderThan 3600) `filter` (fd \\ od))
+        notOlderThan s  a  = unsafePerformIO $ do
+                                ct <- getCurrentTime
+                                case pubDateLt of
+                                    Nothing   -> return $ False
+                                    Just t    -> return $ (isBefore s ct (ltToUtc t))
+                                where  
+                                    ltToUtc x     = localTimeToUTC utc $ fst x
+                                    pubDateLt     = rdtStrToLt (feedItemPubDate a)
+                                    rdtStrToLt st = strptime "%a, %Od %b %Y %OH:%OM:%OS %z" st
         
-        cvtDate dt        = (strptime "%a, %Od %b %Y %OH:%OM:%OS %z" dt)
-        waitAndRecur fd = do 
-                            putStrLn "Waiting"
-                            putMVar fm fd
-                            threadDelay d
-                            updateFeed h d fs fm
+        waitAndRecur fd   = do  putMVar fm fd
+                                threadDelay d
+                                updateFeed h d fs fm
                 
-addMessage m = putMVar messages m
-
-utcTimeToEpochTime :: UTCTime -> EpochTime
-utcTimeToEpochTime = convert
-
 run :: Net ()
 run = do
     setNick     nick
