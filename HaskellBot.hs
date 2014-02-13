@@ -5,6 +5,7 @@ import System.IO
 import System.IO.Unsafe
 import System.Exit
 import System.Time
+import System.Locale
 import Control.Arrow
 import Control.Monad.Reader
 import Control.Monad.State
@@ -48,15 +49,20 @@ feeds       =   [
                         feedUrl         = "http://www.reddit.com/r/gamedevbottesting/new/.rss"
                     }
                 ]
+
 data Bot = Bot { 
             socket    :: Handle,
-            startTime :: ClockTime 
+            startTime :: ClockTime, 
+            lastPong  :: MVar UTCTime
            }
 
 type Net = ReaderT Bot IO
 
 main :: IO ()
-main =  bracket connect disconnect loop
+main = startBot 
+
+startBot :: IO ()
+startBot =  bracket connect disconnect loop 
         where
             disconnect = hClose . socket
             loop st    = catch (runReaderT run st) (\(e :: IOException) -> return ()) 
@@ -68,19 +74,33 @@ connect :: IO Bot
 connect = notify $ do
         h <- connectTo server $ PortNumber $ fromIntegral port
         t <- getClockTime
+        ct <- getCurrentTime
+        mv <- newEmptyMVar
         hSetBuffering h NoBuffering
         forkIO $ (dispatchMessages h 1000000)
+        forkIO $ (botWatchDog mv ct)
         mapM (spawnFeedProc h) feeds
-        return (Bot h t)
+        return (Bot h t mv)
     where
         spawnFeedProc h fs = do
-                            fm <- newEmptyMVar
-                            forkIO $ updateFeed h ((feedRefreshTime fs) * 1000000) fs fm 
+                                fm <- newEmptyMVar
+                                forkIO $ updateFeed h ((feedRefreshTime fs) * 1000000) fs fm 
         notify a = bracket_
             (printf "Connecting to %s ... " server >> hFlush stdout)
             (putStrLn "done.")
             a
 
+botWatchDog :: MVar UTCTime -> UTCTime -> IO ()
+botWatchDog mv t = do
+        lp <- tryTakeMVar mv
+        ct <- getCurrentTime
+        case lp of 
+            Nothing  -> if (isWithin 600 ct t) 
+                        then (threadDelay  6000000) >> botWatchDog mv t
+                        else startBot
+            Just t  ->  botWatchDog mv ct
+
+dispatchMessages :: Handle -> Int -> IO ()
 dispatchMessages h d = do
             m <- takeMVar messages  
             hPutStrLn h $ "PRIVMSG " ++ m
@@ -88,34 +108,40 @@ dispatchMessages h d = do
             threadDelay d
             dispatchMessages h d
 
-isBefore :: Int -> UTCTime -> UTCTime -> Bool
-isBefore i a b = (fromEnum $ (utcTimeToEpochTime a) - (utcTimeToEpochTime b)) < i
+isWithin :: Int -> UTCTime -> UTCTime -> Bool
+isWithin i a b = (fromEnum $ (utcTimeToEpochTime a) - (utcTimeToEpochTime b)) < i
 
 utcTimeToEpochTime :: UTCTime -> EpochTime
 utcTimeToEpochTime = convert
 
+updateFeed :: Handle -> Int -> FeedSource -> MVar [FeedData] -> IO ()
 updateFeed h d fs fm = do
-    fd <- getFeedData fs
-    lfd <- tryTakeMVar fm 
+    nd   <- getFeedData fs
+    lfd  <- tryTakeMVar fm 
+
     putStrLn $ "Updating Feed: " ++ (feedName fs)
+
     case lfd of
-        Nothing  -> waitAndRecur fd
-        Just od  -> writeFeedData h (getNewItems od fd) >> waitAndRecur fd
+        Nothing  -> waitAndRecur nd
+        Just od  -> writeFeedData h (getNewItems od nd) >> waitAndRecur nd
     where
-        getNewItems  od fd = ((notOlderThan 3600) `filter` (fd \\ od))
-        notOlderThan s  a  = unsafePerformIO $ do
-                                ct <- getCurrentTime
-                                case pubDateLt of
-                                    Nothing   -> return $ False
-                                    Just t    -> return $ (isBefore s ct (ltToUtc t))
-                                where  
-                                    ltToUtc x     = localTimeToUTC utc $ fst x
-                                    pubDateLt     = rdtStrToLt (feedItemPubDate a)
-                                    rdtStrToLt st = strptime "%a, %Od %b %Y %OH:%OM:%OS %z" st
+        getNewItems :: [FeedData] -> [FeedData] -> [FeedData]
+        getNewItems od nd = filter (notOlderThan 3600) (nd \\ od)
+
+        notOlderThan :: Int -> FeedData -> Bool
+        notOlderThan s a  = (isWithin s ct) (pubDateUTC a)
+
+        ct :: UTCTime
+        ct = (unsafePerformIO getCurrentTime)
+
+        pubDateUTC :: (FeedData -> UTCTime)
+        pubDateUTC = parseToUTC . feedItemPubDate 
         
-        waitAndRecur fd   = do  putMVar fm fd
-                                threadDelay d
-                                updateFeed h d fs fm
+        parseToUTC :: (String -> UTCTime)
+        parseToUTC = (readTime defaultTimeLocale "%a, %d %b %Y %H:%M:%S %z")
+       
+        waitAndRecur :: [FeedData] -> IO ()
+        waitAndRecur nd = putMVar fm nd >> threadDelay d >> updateFeed h d fs fm
                 
 run :: Net ()
 run = do
@@ -144,38 +170,50 @@ io = liftIO
 
 listen :: Handle -> Net ()
 listen h = forever $ do
-        s <- init `fmap` io (hGetLine h)
-        io $ putStrLn s
-        eval s
+        s       <- init `fmap` io (hGetLine h)
+        (io $ putStrLn s) >> eval s
+
+ping :: String -> Bool
+ping x = "PING :" `isPrefixOf` x
+
+pong :: String -> Net ()
+pong x = do
+            lpmv <- asks lastPong
+            ct   <- io $ getCurrentTime
+            io $ putMVar lpmv ct
+            write "PONG" (':' : drop 6 x)
 
 eval :: String -> Net ()
-eval x =  
-        if      ping                then pong
-        else case cmdIs of
-        "!quit"     -> quitCmd
-        "!say"      -> sayCmd
-        "!uptime"   -> uptimeCmd 
-        _           -> ret
+eval x = do
+            if (ping x) then (pong x)
+            else case cmdIs of
+                "!quit"     -> quitCmd
+                "!say"      -> sayCmd
+                "!uptime"   -> uptimeCmd 
+                "!credits"  -> creditsCmd
+                "!help"     -> helpCmd
+                "!source"   -> sourceCmd
+                _           -> ret
     where
-        ping         = "PING :" `isPrefixOf` x
-        pong         = write "PONG" (':' : drop 6 x)
-        parseIrcCmd  = head (splitOn "!" x) : tail (splitOn " " x)
+        parseIrcCmd  = words x
         clean        = drop 1 . dropWhile (/= ':') . drop 1
-        ircUser      = drop 1 $ parseIrcCmd !! 0
+        ircUser      = drop 1 (splitOn "!" (parseIrcCmd !! 0) !! 0)
         chan         = if ((parseIrcCmd !! 2) == nick) then ircUser else (parseIrcCmd !! 2) 
         botCmd       = clean x
-        isBotCmd     = (length botCmd) > 0 && (botCmd !! 0) == '!'
         cmdIs        = if (not $ null (words botCmd)) then (words botCmd !! 0) else ""
-        sayCmd       = if isAdmin then say else ret 
+        sayCmd       = if isAdmin then say else ret  
         quitCmd      = if isAdmin then quitIrc else ret
         uptimeCmd    = uptime >>= (privmsgTo chan)
+        creditsCmd   = privmsgTo chan "Programmed by DrAwesomeClaws."
+        helpCmd      = privmsgTo chan "Commands: !help !uptime !credits !source !say !quit !listfeeds"
+        sourceCmd    = privmsgTo chan "https://github.com/NucHorseStudios/HaskellDevBot"
         say          = privmsgTo chan $ drop 4 botCmd
-        isAdmin      = ircUser `elem` admins 
-        ret          = io $ return ()
+        isAdmin      = (ircUser `elem` admins)
+        ret          = return ()
                                         
 uptime :: Net String
 uptime = do
-        now <- io getClockTime
+        now  <- io getClockTime
         zero <- asks startTime
         return . prettytime $ diffClockTimes now zero
 
@@ -190,6 +228,7 @@ prettytime td =
             diffs   = filter ((/= 0) . fst) $ reverse $ snd $
                       foldl' merge (tdSec td, []) metrics
 
+writeFeedData :: Handle -> [FeedData] -> IO [()]
 writeFeedData h f = do
         writeItem `mapM` f
     where 
