@@ -6,12 +6,14 @@ import System.IO.Unsafe
 import System.Exit
 import System.Time
 import System.Locale
+import System.Timeout
 import Control.Arrow
 import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad
 import Control.Exception 
 import Control.Concurrent
+import Control.Concurrent.STM
 import Text.Printf
 import Prelude hiding (catch)
 import Data.List
@@ -53,34 +55,39 @@ feeds       =   [
 data Bot = Bot { 
             socket    :: Handle,
             startTime :: ClockTime, 
-            lastPong  :: MVar UTCTime
+            lastPong  :: PongTime
            }
 
 type Net = ReaderT Bot IO
+type PongTime = TVar UTCTime
 
 main :: IO ()
-main = startBot 
+main =  do 
+        ct <- getCurrentTime
+        pt <- atomically $ newTVar ct 
 
-startBot :: IO ()
-startBot =  bracket connect disconnect loop 
-        where
-            disconnect = hClose . socket
-            loop st    = catch (runReaderT run st) (\(e :: IOException) -> return ()) 
+        atomically $ setPongTime pt ct         
+        --forkIO $ botWatchDog pt   
+        forever $ catch (startBot pt) (\(e :: IOException) -> threadDelay 5 >> return ()) 
+
+startBot :: PongTime -> IO ()
+startBot pt =   bracket (connect pt) disconnect loop 
+                where
+                    disconnect = hClose . socket
+                    loop st    = catch (runReaderT run st) (\(e :: IOException) -> return ()) 
 
 messages     = unsafePerformIO (newMVar [])
 addMessage m = putMVar messages m
 
-connect :: IO Bot
-connect = notify $ do
-        h <- connectTo server $ PortNumber $ fromIntegral port
-        t <- getClockTime
-        ct <- getCurrentTime
-        mv <- newEmptyMVar
+connect :: PongTime -> IO Bot
+connect pt = notify $ do
+        h  <- connectTo server $ PortNumber $ fromIntegral port
+        t  <- getClockTime
+
         hSetBuffering h NoBuffering
         forkIO $ (dispatchMessages h 1000000)
-        forkIO $ (botWatchDog mv ct)
         mapM (spawnFeedProc h) feeds
-        return (Bot h t mv)
+        return (Bot h t pt)
     where
         spawnFeedProc h fs = do
                                 fm <- newEmptyMVar
@@ -90,23 +97,25 @@ connect = notify $ do
             (putStrLn "done.")
             a
 
-botWatchDog :: MVar UTCTime -> UTCTime -> IO ()
-botWatchDog mv t = do
-        lp <- tryTakeMVar mv
-        ct <- getCurrentTime
-        case lp of 
-            Nothing  -> if (isWithin 600 ct t) 
-                        then (threadDelay  6000000) >> botWatchDog mv t
-                        else startBot
-            Just t  ->  botWatchDog mv ct
+getLastPong :: PongTime -> STM UTCTime
+getLastPong pt = readTVar pt
+
+botWatchDog :: PongTime -> IO ()
+botWatchDog pt = do
+                    ct <- getCurrentTime
+                    lp <- atomically $ getLastPong pt
+
+                    if (isWithin 600 ct lp) 
+                    then (threadDelay  6000000) >> botWatchDog pt
+                    else startBot pt
 
 dispatchMessages :: Handle -> Int -> IO ()
-dispatchMessages h d = do
-            m <- takeMVar messages  
-            hPutStrLn h $ "PRIVMSG " ++ m
-            putStrLn $ "PRIVMSG " ++ m
-            threadDelay d
-            dispatchMessages h d
+dispatchMessages h d =  do  m <- takeMVar messages  
+                            
+                            hPutStrLn h $ "PRIVMSG " ++ m 
+                            putStrLn $ "PRIVMSG " ++ m 
+                            threadDelay d 
+                            dispatchMessages h d
 
 isWithin :: Int -> UTCTime -> UTCTime -> Bool
 isWithin i a b = (fromEnum $ (utcTimeToEpochTime a) - (utcTimeToEpochTime b)) < i
@@ -153,6 +162,7 @@ run = do
 write :: String -> String -> Net ()
 write s t = do
     h <- asks socket
+    
     io $ hPrintf h "%s %s\r\n" s t
     io $ printf    "> %s %s\n" s t
 
@@ -169,19 +179,24 @@ io :: IO a -> Net a
 io = liftIO
 
 listen :: Handle -> Net ()
-listen h = forever $ do
-        s       <- init `fmap` io (hGetLine h)
-        (io $ putStrLn s) >> eval s
+listen h = do
+            s  <- io $ timeout (3 * 1000000) $ init `fmap` (hGetLine h)
+            case s of 
+                Nothing -> (io $ putStrLn "Timeout") >> (io $ hPutStrLn h " ") >> listen h
+                Just s  -> (eval s) >> (io $ putStrLn s) >> listen h
 
 ping :: String -> Bool
 ping x = "PING :" `isPrefixOf` x
 
+setPongTime :: PongTime -> UTCTime -> STM ()
+setPongTime pt t = writeTVar pt t
+
 pong :: String -> Net ()
 pong x = do
-            lpmv <- asks lastPong
-            ct   <- io $ getCurrentTime
-            io $ putMVar lpmv ct
-            write "PONG" (':' : drop 6 x)
+         ct <- io $ getCurrentTime
+         pt <- asks lastPong
+         io $ atomically $ setPongTime pt ct
+         write "PONG" (':' : drop 6 x)
 
 eval :: String -> Net ()
 eval x = do
