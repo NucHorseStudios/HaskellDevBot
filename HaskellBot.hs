@@ -54,24 +54,18 @@ feeds       =   [
 
 data Bot = Bot { 
             socket    :: Handle,
-            startTime :: ClockTime, 
-            lastPong  :: PongTime
+            startTime :: ClockTime 
            }
 
 type Net = ReaderT Bot IO
-type PongTime = TVar UTCTime
 
 main :: IO ()
 main =  do 
         ct <- getCurrentTime
-        pt <- atomically $ newTVar ct 
+        forever $ catch startBot (\(e :: IOException) -> (threadDelay $ 5 * 1000000) >> (return ()) ) 
 
-        atomically $ setPongTime pt ct         
-        --forkIO $ botWatchDog pt   
-        forever $ catch (startBot pt) (\(e :: IOException) -> threadDelay 5 >> return ()) 
-
-startBot :: PongTime -> IO ()
-startBot pt =   bracket (connect pt) disconnect loop 
+startBot :: IO ()
+startBot =   bracket connect disconnect loop 
                 where
                     disconnect = hClose . socket
                     loop st    = catch (runReaderT run st) (\(e :: IOException) -> return ()) 
@@ -79,15 +73,15 @@ startBot pt =   bracket (connect pt) disconnect loop
 messages     = unsafePerformIO (newMVar [])
 addMessage m = putMVar messages m
 
-connect :: PongTime -> IO Bot
-connect pt = notify $ do
+connect :: IO Bot
+connect = notify $ do
         h  <- connectTo server $ PortNumber $ fromIntegral port
         t  <- getClockTime
 
         hSetBuffering h NoBuffering
         forkIO $ (dispatchMessages h 1000000)
         mapM (spawnFeedProc h) feeds
-        return (Bot h t pt)
+        return (Bot h t)
     where
         spawnFeedProc h fs = do
                                 fm <- newEmptyMVar
@@ -96,18 +90,6 @@ connect pt = notify $ do
             (printf "Connecting to %s ... " server >> hFlush stdout)
             (putStrLn "done.")
             a
-
-getLastPong :: PongTime -> STM UTCTime
-getLastPong pt = readTVar pt
-
-botWatchDog :: PongTime -> IO ()
-botWatchDog pt = do
-                    ct <- getCurrentTime
-                    lp <- atomically $ getLastPong pt
-
-                    if (isWithin 600 ct lp) 
-                    then (threadDelay  6000000) >> botWatchDog pt
-                    else startBot pt
 
 dispatchMessages :: Handle -> Int -> IO ()
 dispatchMessages h d =  do  m <- takeMVar messages  
@@ -157,6 +139,7 @@ run = do
     setNick     nick
     setUser     (nick++" 0 * :haskelldev bot")
     joinChannel ircChannel
+    privmsg     "Hello"
     asks socket >>= listen 
 
 write :: String -> String -> Net ()
@@ -182,21 +165,14 @@ listen :: Handle -> Net ()
 listen h = do
             s  <- io $ timeout (3 * 1000000) $ init `fmap` (hGetLine h)
             case s of 
-                Nothing -> (io $ putStrLn "Timeout") >> (io $ hPutStrLn h " ") >> listen h
+                Nothing -> (io $ hPutStrLn h " ") >> listen h
                 Just s  -> (eval s) >> (io $ putStrLn s) >> listen h
 
 ping :: String -> Bool
 ping x = "PING :" `isPrefixOf` x
 
-setPongTime :: PongTime -> UTCTime -> STM ()
-setPongTime pt t = writeTVar pt t
-
 pong :: String -> Net ()
-pong x = do
-         ct <- io $ getCurrentTime
-         pt <- asks lastPong
-         io $ atomically $ setPongTime pt ct
-         write "PONG" (':' : drop 6 x)
+pong x = write "PONG" (':' : drop 6 x)
 
 eval :: String -> Net ()
 eval x = do
