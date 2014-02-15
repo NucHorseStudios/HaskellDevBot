@@ -52,102 +52,80 @@ feeds       =   [
                     }
                 ]
 
-data Bot = Bot { 
-            socket    :: Handle,
-            startTime :: ClockTime 
-           }
-
 type Net = ReaderT Bot IO
 
+data Bot =  Bot {
+                socket    :: Handle,
+                startTime :: ClockTime,
+                messages  :: TVar [String]
+            }
+
+io :: IO a -> Net a
+io = liftIO
+
 main :: IO ()
-main =  do 
+main 
+    = do 
         ct <- getCurrentTime
         forever $ catch startBot (\(e :: IOException) -> (threadDelay $ 5 * 1000000) >> (return ()) ) 
 
 startBot :: IO ()
-startBot =   bracket connect disconnect loop 
-                where
-                    disconnect = hClose . socket
-                    loop st    = catch (runReaderT run st) (\(e :: IOException) -> return ()) 
+startBot 
+    = do 
+        mv <- atomically $ newTVar ([] :: [String])
+        bracket (connect mv) disconnect loop 
+        where
+            disconnect = hClose . socket
+            loop st    = catch (runReaderT run st) (\(e :: IOException) -> return ()) 
 
-messages     = unsafePerformIO (newMVar [])
-addMessage m = putMVar messages m
-
-connect :: IO Bot
-connect = notify $ do
+connect :: TVar [String] -> IO Bot
+connect mv
+    = notify $ do
         h  <- connectTo server $ PortNumber $ fromIntegral port
         t  <- getClockTime
 
         hSetBuffering h NoBuffering
-        forkIO $ (dispatchMessages h 1000000)
+        forkIO $ dispatchMessages h 1000000 mv
         mapM (spawnFeedProc h) feeds
-        return (Bot h t)
+        return (Bot h t mv)
+    
     where
-        spawnFeedProc h fs = do
-                                fm <- newEmptyMVar
-                                forkIO $ updateFeed h ((feedRefreshTime fs) * 1000000) fs fm 
+        spawnFeedProc h fs 
+            = do
+                fd <- atomically $ newTVar ([] :: [FeedData]) 
+                forkIO $ updateFeed h rt fs fd mv
+            where
+                rt = (feedRefreshTime fs) * 1000000
+        
         notify a = bracket_
             (printf "Connecting to %s ... " server >> hFlush stdout)
             (putStrLn "done.")
             a
 
-dispatchMessages :: Handle -> Int -> IO ()
-dispatchMessages h d =  do  m <- takeMVar messages  
-                            
-                            hPutStrLn h $ "PRIVMSG " ++ m 
-                            putStrLn $ "PRIVMSG " ++ m 
-                            threadDelay d 
-                            dispatchMessages h d
-
-isWithin :: Int -> UTCTime -> UTCTime -> Bool
-isWithin i a b = (fromEnum $ (utcTimeToEpochTime a) - (utcTimeToEpochTime b)) < i
-
-utcTimeToEpochTime :: UTCTime -> EpochTime
-utcTimeToEpochTime = convert
-
-updateFeed :: Handle -> Int -> FeedSource -> MVar [FeedData] -> IO ()
-updateFeed h d fs fm = do
-    nd   <- getFeedData fs
-    lfd  <- tryTakeMVar fm 
-
-    putStrLn $ "Updating Feed: " ++ (feedName fs)
-
-    case lfd of
-        Nothing  -> waitAndRecur nd
-        Just od  -> writeFeedData h (getNewItems od nd) >> waitAndRecur nd
-    where
-        getNewItems :: [FeedData] -> [FeedData] -> [FeedData]
-        getNewItems od nd = filter (notOlderThan 3600) (nd \\ od)
-
-        notOlderThan :: Int -> FeedData -> Bool
-        notOlderThan s a  = (isWithin s ct) (pubDateUTC a)
-
-        ct :: UTCTime
-        ct = (unsafePerformIO getCurrentTime)
-
-        pubDateUTC :: (FeedData -> UTCTime)
-        pubDateUTC = parseToUTC . feedItemPubDate 
-        
-        parseToUTC :: (String -> UTCTime)
-        parseToUTC = (readTime defaultTimeLocale "%a, %d %b %Y %H:%M:%S %z")
-       
-        waitAndRecur :: [FeedData] -> IO ()
-        waitAndRecur nd = putMVar fm nd >> threadDelay d >> updateFeed h d fs fm
-                
 run :: Net ()
-run = do
-    setNick     nick
-    setUser     (nick++" 0 * :haskelldev bot")
-    joinChannel ircChannel
-    privmsg     "Hello"
-    asks socket >>= listen 
+run 
+    = do
+        setNick     nick
+        setUser     (nick++" 0 * :haskelldev bot")
+        joinChannel ircChannel
+        asks socket >>= listen 
+
+listen :: Handle -> Net ()
+listen h 
+    = do
+        s <- io $ timeout (3 * 1000000) $ init `fmap` (hGetLine h)
+        
+        case s of 
+            Nothing -> (io $ hPutStrLn h " ") >> listen h
+            Just s  -> (eval s) >> (io $ putStrLn s) >> listen h
 
 write :: String -> String -> Net ()
-write s t = do
-    h <- asks socket
+write s t 
+    = do
+        h <- asks socket
     
-    io $ hPrintf h "%s %s\r\n" s t
-    io $ printf    "> %s %s\n" s t
+        io $ hPrintf h "%s %s\r\n" s t
+        io $ printf    "> %s %s\n" s t
 
 setUser :: String -> Net ()
 setUser u = write "USER" u
@@ -158,15 +136,71 @@ setNick n = write "NICK" n
 joinChannel :: String -> Net ()
 joinChannel ch = write "JOIN" ch
 
-io :: IO a -> Net a
-io = liftIO
+addMessage :: TVar [String] -> String-> STM ()
+addMessage mv m
+    = do
+        msgs <- readTVar mv
+        writeTVar mv (m : msgs)
 
-listen :: Handle -> Net ()
-listen h = do
-            s  <- io $ timeout (3 * 1000000) $ init `fmap` (hGetLine h)
-            case s of 
-                Nothing -> (io $ hPutStrLn h " ") >> listen h
-                Just s  -> (eval s) >> (io $ putStrLn s) >> listen h
+popMessages :: TVar [String] -> STM (Maybe String)
+popMessages mv
+    = do
+        m <- readTVar mv
+        case m of
+            [] -> return Nothing
+            x  -> do
+                    (writeTVar mv (init x))  
+                    return $ Just (last x)
+
+dispatchMessages :: Handle -> Int -> TVar [String] -> IO ()
+dispatchMessages h d mv
+    =  do  
+        m <- atomically $ popMessages mv
+        case m of
+            Nothing ->   waitAndRecur
+            Just x  ->   hPutStrLn h (msg x) >> putStrLn (msg x) >> waitAndRecur
+        where
+            msg x        = "PRIVMSG " ++ x 
+            waitAndRecur = threadDelay d >> dispatchMessages h d mv
+
+isWithin :: Int -> UTCTime -> UTCTime -> Bool
+isWithin i a b = (fromEnum $ (utcTimeToEpochTime a) - (utcTimeToEpochTime b)) < i
+
+utcTimeToEpochTime :: UTCTime -> EpochTime
+utcTimeToEpochTime = convert
+
+updateFeed :: Handle -> Int -> FeedSource -> TVar [FeedData] -> TVar [String] -> IO ()
+updateFeed h d fs fd mv
+    = do
+        nd   <- getFeedData fs
+        lfd  <- atomically $ readTVar fd 
+
+        putStrLn $ "Updating Feed: " ++ (feedName fs)
+
+        case lfd of
+            []  -> waitAndRecur nd
+            x   -> writeFeedData h mv (getNewItems x nd) >> waitAndRecur nd
+        where
+            getNewItems :: [FeedData] -> [FeedData] -> [FeedData]
+            getNewItems od nd = filter (notOlderThan 3600) (nd \\ od)
+
+            notOlderThan :: Int -> FeedData -> Bool
+            notOlderThan s a  = (isWithin s ct) (pubDateUTC a)
+
+            ct :: UTCTime
+            ct = (unsafePerformIO getCurrentTime)
+
+            pubDateUTC :: (FeedData -> UTCTime)
+            pubDateUTC = parseToUTC . feedItemPubDate 
+        
+            parseToUTC :: (String -> UTCTime)
+            parseToUTC = (readTime defaultTimeLocale "%a, %d %b %Y %H:%M:%S %z")
+       
+            waitAndRecur :: [FeedData] -> IO ()
+            waitAndRecur nd =   (atomically $ writeTVar fd nd) >> 
+                                threadDelay d >> 
+                                updateFeed h d fs fd mv
+                
 
 ping :: String -> Bool
 ping x = "PING :" `isPrefixOf` x
@@ -175,16 +209,17 @@ pong :: String -> Net ()
 pong x = write "PONG" (':' : drop 6 x)
 
 eval :: String -> Net ()
-eval x = do
-            if (ping x) then (pong x)
-            else case cmdIs of
-                "!quit"     -> quitCmd
-                "!say"      -> sayCmd
-                "!uptime"   -> uptimeCmd 
-                "!credits"  -> creditsCmd
-                "!help"     -> helpCmd
-                "!source"   -> sourceCmd
-                _           -> ret
+eval x =   
+    if (ping x) then (pong x)
+    else 
+    case cmdIs of
+        "!quit"     -> quitCmd
+        "!say"      -> sayCmd
+        "!uptime"   -> uptimeCmd 
+        "!credits"  -> creditsCmd
+        "!help"     -> helpCmd
+        "!source"   -> sourceCmd
+        _           -> ret
     where
         parseIrcCmd  = words x
         clean        = drop 1 . dropWhile (/= ':') . drop 1
@@ -203,7 +238,8 @@ eval x = do
         ret          = return ()
                                         
 uptime :: Net String
-uptime = do
+uptime 
+    = do
         now  <- io getClockTime
         zero <- asks startTime
         return . prettytime $ diffClockTimes now zero
@@ -219,11 +255,13 @@ prettytime td =
             diffs   = filter ((/= 0) . fst) $ reverse $ snd $
                       foldl' merge (tdSec td, []) metrics
 
-writeFeedData :: Handle -> [FeedData] -> IO [()]
-writeFeedData h f = do
+writeFeedData :: Handle -> TVar [String] -> [FeedData] -> IO [()]
+writeFeedData h mv f 
+    = do
         writeItem `mapM` f
     where 
-        writeItem x = addMessage $ ircChannel ++ " : " ++ name x ++ ": " ++ text x ++ " <" ++ url x ++ ">"
+        writeItem x = atomically $ addMessage mv (m x)
+        m    x      = ircChannel ++ " : " ++ name x ++ ": " ++ text x ++ " <" ++ url x ++ ">"
         name x      = (feedName (feedItemSource x))
         text x      = (feedItemTitle x)
         url  x      = take (39 + (length $ name x)) (feedItemUrl x) 
@@ -235,4 +273,8 @@ privmsg :: String -> Net ()
 privmsg text = privmsgTo ircChannel text
 
 privmsgTo :: String -> String -> Net ()
-privmsgTo to text = io $ addMessage (to ++ " :" ++ text)
+privmsgTo to text 
+    = do 
+        mv <- asks messages
+        io $ atomically $ addMessage mv (to ++ " :" ++ text)
+
