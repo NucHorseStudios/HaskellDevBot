@@ -9,41 +9,58 @@ import Data.Char
 import Data.List
 
 import Control.Monad.Reader     
+import Control.Exception  
 import Network.URI
 import Network.HTTP
 import Data.Maybe
 
-downloadUrl url =
-    do resp <- simpleHTTP request
-       case resp of
-            Left  x -> return $ Left ("Error connectng: " ++ show x)
-            Right r ->
-                  case rspCode r of
+downloadUrl url 
+    =   catch makeRequest onError
+        where 
+
+            makeRequest :: IO (Either String String)
+            makeRequest = do 
+                    resp <- simpleHTTP request
+                            
+                    case resp of
+                        Left  x -> return $ Left ("Error connectng: " ++ show x)
+                        Right r -> handleResponse r
+            
+            handleResponse :: Response [Char] -> IO (Either String String)
+            handleResponse r = 
+                case rspCode r of
                     (2,_,_) -> return $ Right (rspBody r)
-                    (3,_,_) -> 
-                        case findHeader HdrLocation r of
-                            Nothing -> return $ Left (show r)
-                            Just url -> downloadUrl url
-                    
-                    _      -> return $ Left (show r)
-    where
-        request = Request {
+                    (3,_,_) -> handleRedirect r
+                    _       -> return $ Left (show r)
+            
+            handleRedirect :: Response [Char] -> IO (Either String String)
+            handleRedirect r = 
+                case findHeader HdrLocation r of
+                    Nothing -> return $ Left (show r)
+                    Just url -> downloadUrl url
+                                        
+            onError :: IOException -> IO (Either String String)
+            onError e  = return $ Left "Error Connecting."
+            
+            request = Request {
                     rqURI       = uri,
                     rqMethod    = GET,
                     rqHeaders   = [],
                     rqBody      = ""
                   }
-        uri     = fromJust $ parseURI url
+            uri     = fromJust $ parseURI url
 
-getFeedData :: FeedSource -> IO [FeedData]
-getFeedData fs =
-    do resp <- downloadUrl (feedUrl fs)
-       case resp of 
-            Left x -> return []
-            Right doc -> return $ (itemToFeedData fs) `map` (items doc)
-       where 
-            items doc = feedItems (parse doc name)
-            name  = (feedName fs) 
+getFeedData :: FeedSource -> IO (Maybe [FeedData])
+getFeedData fs 
+    = do 
+        resp <- downloadUrl (feedUrl fs) 
+        case resp of 
+            Left x      -> return Nothing
+            Right doc   -> return $ Just $ ((itemToFeedData fs) `map` (items doc))
+    where 
+        onError e                   = return Nothing 
+        items   doc                 = feedItems (parse doc name)
+        name                        = (feedName fs) 
 
 data FeedItem = 
      FeedItem {     

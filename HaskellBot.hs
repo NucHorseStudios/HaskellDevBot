@@ -93,12 +93,15 @@ connect mv
         spawnFeedProc h fs 
             = do
                 fd <- atomically $ newTVar ([] :: [FeedData]) 
+
                 forkIO $ updateFeed h rt fs fd mv
+            
             where
                 rt = (feedRefreshTime fs) * 1000000
-        
+                onException (e :: IOException) = return e
+
         notify a = bracket_
-            (printf "Connecting to %s ... " server >> hFlush stdout)
+            ((printf "Connecting to %s ... " server)  >> (hFlush stdout))
             (putStrLn "done.")
             a
 
@@ -164,26 +167,39 @@ dispatchMessages h d mv
             waitAndRecur = threadDelay d >> dispatchMessages h d mv
 
 isWithin :: Int -> UTCTime -> UTCTime -> Bool
-isWithin i a b = (fromEnum $ (utcTimeToEpochTime a) - (utcTimeToEpochTime b)) < i
+isWithin i a b = (fromEnum $  (utcTimeToEpochTime a) - (utcTimeToEpochTime b)) < i
 
 utcTimeToEpochTime :: UTCTime -> EpochTime
 utcTimeToEpochTime = convert
+
+replaceFeedData :: TVar [FeedData] -> [FeedData] -> STM ([FeedData])
+replaceFeedData ftv nd 
+    = do
+        od <- readTVar ftv
+        writeTVar ftv nd
+        return od
 
 updateFeed :: Handle -> Int -> FeedSource -> TVar [FeedData] -> TVar [String] -> IO ()
 updateFeed h d fs fd mv
     = do
         nd   <- getFeedData fs
-        lfd  <- atomically $ readTVar fd 
 
         putStrLn $ "Updating Feed: " ++ (feedName fs)
 
-        case lfd of
-            []  -> waitAndRecur nd
-            x   -> writeFeedData h mv (getNewItems x nd) >> waitAndRecur nd
+        case nd of 
+            Nothing -> putStrLn "Error getting data" >> waitAndRecur  
+            Just d  -> 
+                do  
+                    od <- atomically $ replaceFeedData fd d
+
+                    if null od 
+                    then waitAndRecur
+                    else (writeFeedData h mv (getNewItems od d)) >> waitAndRecur
+
         where
             getNewItems :: [FeedData] -> [FeedData] -> [FeedData]
             getNewItems od nd = filter (notOlderThan 3600) (nd \\ od)
-
+            
             notOlderThan :: Int -> FeedData -> Bool
             notOlderThan s a  = (isWithin s ct) (pubDateUTC a)
 
@@ -196,12 +212,9 @@ updateFeed h d fs fd mv
             parseToUTC :: (String -> UTCTime)
             parseToUTC = (readTime defaultTimeLocale "%a, %d %b %Y %H:%M:%S %z")
        
-            waitAndRecur :: [FeedData] -> IO ()
-            waitAndRecur nd =   (atomically $ writeTVar fd nd) >> 
-                                threadDelay d >> 
-                                updateFeed h d fs fd mv
+            waitAndRecur :: IO ()
+            waitAndRecur = threadDelay d >> updateFeed h d fs fd mv
                 
-
 ping :: String -> Bool
 ping x = "PING :" `isPrefixOf` x
 
