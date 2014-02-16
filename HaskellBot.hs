@@ -67,7 +67,9 @@ main :: IO ()
 main 
     = do 
         ct <- getCurrentTime
-        forever $ catch startBot (\(e :: IOException) -> (threadDelay $ 5 * 1000000) >> (return ()) ) 
+        forever $ catch startBot (\(e :: IOException) -> (threadDelay fiveSeconds) >> return () ) 
+    where
+        fiveSeconds = 5 * 1000000
 
 startBot :: IO ()
 startBot 
@@ -98,7 +100,6 @@ connect mv
             
             where
                 rt = (feedRefreshTime fs) * 1000000
-                onException (e :: IOException) = return e
 
         notify a = bracket_
             ((printf "Connecting to %s ... " server)  >> (hFlush stdout))
@@ -116,11 +117,13 @@ run
 listen :: Handle -> Net ()
 listen h 
     = do
-        s <- io $ timeout (3 * 1000000) $ init `fmap` (hGetLine h)
+        s <- io $ timeout threeSeconds $ init `fmap` (hGetLine h)
         
         case s of 
             Nothing -> (io $ hPutStrLn h " ") >> listen h
             Just s  -> (eval s) >> (io $ putStrLn s) >> listen h
+    where
+        threeSeconds = 3 * 1000000
 
 write :: String -> String -> Net ()
 write s t 
@@ -151,8 +154,8 @@ popMessages mv
         m <- readTVar mv
         case m of
             [] -> return Nothing
-            x  -> do
-                    (writeTVar mv (init x))  
+            x  -> do 
+                    (writeTVar mv (init x)) 
                     return $ Just (last x)
 
 dispatchMessages :: Handle -> Int -> TVar [String] -> IO ()

@@ -14,55 +14,8 @@ import Network.URI
 import Network.HTTP
 import Data.Maybe
 
-downloadUrl url 
-    =   catch makeRequest onError
-        where 
 
-            makeRequest :: IO (Either String String)
-            makeRequest = do 
-                    resp <- simpleHTTP request
-                            
-                    case resp of
-                        Left  x -> return $ Left ("Error connectng: " ++ show x)
-                        Right r -> handleResponse r
-            
-            handleResponse :: Response [Char] -> IO (Either String String)
-            handleResponse r = 
-                case rspCode r of
-                    (2,_,_) -> return $ Right (rspBody r)
-                    (3,_,_) -> handleRedirect r
-                    _       -> return $ Left (show r)
-            
-            handleRedirect :: Response [Char] -> IO (Either String String)
-            handleRedirect r = 
-                case findHeader HdrLocation r of
-                    Nothing -> return $ Left (show r)
-                    Just url -> downloadUrl url
-                                        
-            onError :: IOException -> IO (Either String String)
-            onError e  = return $ Left "Error Connecting."
-            
-            request = Request {
-                    rqURI       = uri,
-                    rqMethod    = GET,
-                    rqHeaders   = [],
-                    rqBody      = ""
-                  }
-            uri     = fromJust $ parseURI url
-
-getFeedData :: FeedSource -> IO (Maybe [FeedData])
-getFeedData fs 
-    = do 
-        resp <- downloadUrl (feedUrl fs) 
-        case resp of 
-            Left x      -> return Nothing
-            Right doc   -> return $ Just $ ((itemToFeedData fs) `map` (items doc))
-    where 
-        onError e                   = return Nothing 
-        items   doc                 = feedItems (parse doc name)
-        name                        = (feedName fs) 
-
-data FeedItem = 
+data FeedItem =
      FeedItem {     
         itemTitle   :: String,
         itemPubDate :: String,
@@ -76,6 +29,56 @@ data Feed =
         feedItems    :: [FeedItem]
     }
     deriving (Eq, Show, Read)
+
+downloadUrl :: String -> IO (Either String String)
+downloadUrl url =
+    catch makeRequest onError
+    where 
+        makeRequest :: IO (Either String String)
+        makeRequest 
+            = do 
+                resp <- simpleHTTP request
+                case resp of
+                    Left  x -> return $ Left ("Error connectng: " ++ show x)
+                    Right r -> handleResponse r
+            
+        handleResponse :: Response [Char] -> IO (Either String String)
+        handleResponse r = 
+            case rspCode r of
+                (2,_,_) -> return $ Right (rspBody r)
+                (3,_,_) -> handleRedirect r
+                _       -> return $ Left (show r)
+            
+        handleRedirect :: Response [Char] -> IO (Either String String)
+        handleRedirect r = 
+            case findHeader HdrLocation r of
+                Nothing -> return $ Left (show r)
+                Just url -> downloadUrl url
+                                        
+        onError :: IOException -> IO (Either String String)
+        onError e = return $ Left "Error Connecting."
+
+        request =   Request {
+                        rqURI       = uri,
+                        rqMethod    = GET,
+                        rqHeaders   = [],
+                        rqBody      = ""
+                    }
+
+        uri :: URI
+        uri = fromJust $ parseURI url
+
+getFeedData :: FeedSource -> IO (Maybe [FeedData])
+getFeedData fs 
+    = do 
+        resp <- downloadUrl (feedUrl fs) 
+        case resp of 
+            Left  _     -> return Nothing
+            Right doc   -> return $ Just $ ((itemToFeedData fs) `map` (items doc))
+    where 
+        items   doc                 = feedItems (parse doc name)
+        name                        = (feedName fs) 
+
 
 itemToFeedData :: FeedSource -> FeedItem -> FeedData
 itemToFeedData fs item =
