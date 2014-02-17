@@ -66,9 +66,12 @@ io = liftIO
 main :: IO ()
 main 
     = do 
-        ct <- getCurrentTime
-        forever $ catch startBot (\(e :: IOException) -> (threadDelay fiveSeconds) >> return () ) 
+        forever $ catch startBot onError 
     where
+        onError :: IOException -> IO ()
+        onError e = (threadDelay fiveSeconds) >> return ()
+
+        fiveSeconds :: Int
         fiveSeconds = 5 * 1000000
 
 startBot :: IO ()
@@ -92,6 +95,12 @@ connect mv
         return (Bot h t mv)
     
     where
+        notify a = bracket_
+            ((printf "Connecting to %s ... " server)  >> (hFlush stdout))
+            (putStrLn "done.")
+            a
+
+        spawnFeedProc :: Handle -> FeedSource -> IO (ThreadId)
         spawnFeedProc h fs 
             = do
                 fd <- atomically $ newTVar ([] :: [FeedData]) 
@@ -99,12 +108,9 @@ connect mv
                 forkIO $ updateFeed h rt fs fd mv
             
             where
+                rt :: Int
                 rt = (feedRefreshTime fs) * 1000000
-
-        notify a = bracket_
-            ((printf "Connecting to %s ... " server)  >> (hFlush stdout))
-            (putStrLn "done.")
-            a
+    
 
 run :: Net ()
 run 
@@ -123,6 +129,7 @@ listen h
             Nothing -> (io $ hPutStrLn h " ") >> listen h
             Just s  -> (eval s) >> (io $ putStrLn s) >> listen h
     where
+        threeSeconds :: Int
         threeSeconds = 3 * 1000000
 
 write :: String -> String -> Net ()
@@ -166,7 +173,10 @@ dispatchMessages h d mv
             Nothing ->   waitAndRecur
             Just x  ->   hPutStrLn h (msg x) >> putStrLn (msg x) >> waitAndRecur
         where
+            msg :: String -> String
             msg x        = "PRIVMSG " ++ x 
+            
+            waitAndRecur :: IO ()
             waitAndRecur = threadDelay d >> dispatchMessages h d mv
 
 isWithin :: Int -> UTCTime -> UTCTime -> Bool
@@ -186,7 +196,7 @@ updateFeed :: Handle -> Int -> FeedSource -> TVar [FeedData] -> TVar [String] ->
 updateFeed h d fs fd mv
     = do
         nd   <- getFeedData fs
-
+        
         putStrLn $ "Updating Feed: " ++ (feedName fs)
 
         case nd of 
