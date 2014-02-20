@@ -131,7 +131,7 @@ connect mv
     = notify $ do
         h   <- connectTo server $ PortNumber $ fromIntegral port
         t   <- getClockTime
-        dbh <- connectDb "test.db"
+        dbh <- connectDb "haskellbot.db"
 
         hSetBuffering h NoBuffering
         forkIO $ dispatchMessages h 1000000 mv
@@ -213,14 +213,14 @@ dispatchMessages h d mv
             waitAndRecur :: IO ()
             waitAndRecur = threadDelay d >> dispatchMessages h d mv
 
-eval :: String -> Net ()
+eval :: String -> Net ThreadId
 eval t 
     = do
-        if (ping t) then (pong t)
-
+        st <- ask
+        if (ping t) then (io $ forkIO $ runReaderT (pong t) st)
         else case (getCommand botCmd) of
-            Nothing  -> return ()
-            Just bc  -> (cmd bc) t ircUser chan
+            Nothing  -> io $ forkIO $ runReaderT (return ()) st
+            Just bc  -> io $ forkIO $ runReaderT ((cmd bc) t ircUser chan) st 
         where
             parseIrcCmd  = words t
             clean        = drop 1 . dropWhile (/= ':') . drop 1
@@ -333,7 +333,7 @@ writeFeedData h mv f
 ping :: String -> Bool
 ping x = "PING :" `isPrefixOf` x
 
-pong :: String -> Net ()
+pong :: String -> Net () 
 pong x = write "PONG" (':' : drop 6 x)
 
 setUser :: String -> Net ()
