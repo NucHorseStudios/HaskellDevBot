@@ -33,29 +33,7 @@ import Database.HDBC
 import Database.HDBC.Sqlite3 
 import BotDataTypes
 import BotDB
-
-server      = "irc.freenode.org"
-port        = 6667
-ircChannel  = "##hb-testing"
-botNick     = "GamedevBotT"
-master      = "DrAwesomeClaws"
-feeds       =   [
-                    FeedSource { 
-                        feedName        = "r/gamedev", 
-                        feedRefreshTime = 30,
-                        feedUrl         = "http://www.reddit.com/r/gamedev/new/.rss"
-                    },
-                    FeedSource {
-                        feedName        = "r/truegamedev",
-                        feedRefreshTime = 30, 
-                        feedUrl         = "http://www.reddit.com/r/truegamedev/new/.rss"
-                    },
-                    FeedSource {
-                        feedName        = "r/gamedevbottesting",
-                        feedRefreshTime = 10, 
-                        feedUrl         = "http://www.reddit.com/r/gamedevbottesting/new/.rss"
-                    }
-                ]
+import BotConfig
 
 botCommands = 
     [
@@ -222,10 +200,19 @@ eval t
             Nothing  -> io $ forkIO $ runReaderT (return ()) st
             Just bc  -> io $ forkIO $ runReaderT ((cmd bc) t ircUser chan) st 
         where
+            parseIrcCmd :: [String]
             parseIrcCmd  = words t
+
+            clean :: String -> String
             clean        = drop 1 . dropWhile (/= ':') . drop 1
+            
+            ircUser :: String
             ircUser      = drop 1 (splitOn "!" (parseIrcCmd !! 0) !! 0)
+            
+            chan :: String
             chan         = if ((parseIrcCmd !! 2) == botNick) then ircUser else (parseIrcCmd !! 2) 
+            
+            botCmd :: String
             botCmd       = if null (words (clean t)) then "" else (words (clean t)) !! 0
 
 getCommand :: String -> Maybe BotCommand

@@ -5,6 +5,7 @@ import Database.HDBC
 import Database.HDBC.Sqlite3 
 import Data.List (sort)
 import BotDataTypes 
+import BotConfig
 
 connectDb :: FilePath -> IO Connection
 connectDb fp 
@@ -20,11 +21,11 @@ prepDB dbh
         
         when (not ("users" `elem` tables)) $ do 
             run dbh "CREATE TABLE users (\
-                        \ user_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,\
-                        \ nick TEXT NOT NULL UNIQUE,\
+                        \ user_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,\ 
+                        \ nick TEXT NOT NULL UNIQUE,\ 
                         \ last_seen INTEGER NOT NULL)" []
 
-            run    dbh "INSERT INTO users (nick, last_seen) values ('DrAwesomeClaws', 0)" []
+            run    dbh ("INSERT INTO users (nick, last_seen) values ('" ++ master ++ "', 0)") []
 
             return ()
         
