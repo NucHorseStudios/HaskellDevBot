@@ -1,4 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
+module HaskellBot where
+
 import Data.List
 import Network
 import System.IO
@@ -27,13 +29,16 @@ import System.Posix.Types (EpochTime(..))
 import Data.Time.Clock (UTCTime(..))
 import FeedTypes
 import FeedParser
+import Database.HDBC
+import Database.HDBC.Sqlite3 
+import BotDataTypes
+import BotDB
 
 server      = "irc.freenode.org"
 port        = 6667
 ircChannel  = "##hb-testing"
-nick        = "GamedevBotT"
+botNick     = "GamedevBotT"
 master      = "DrAwesomeClaws"
-admins      = master : ["DrAwesomeClaws_"]
 feeds       =   [
                     FeedSource { 
                         feedName        = "r/gamedev", 
@@ -52,13 +57,51 @@ feeds       =   [
                     }
                 ]
 
-type Net = ReaderT Bot IO
+botCommands = 
+    [
+        BotCommand {
+            cmdName     = "!quit",
+            cmd         = (\t u c -> do 
+                                        admin <- isAdmin u
+                                        if admin 
+                                        then (write "QUIT" ":Exiting" >> io (exitWith ExitSuccess)) 
+                                        else return ())
+        },
 
-data Bot =  Bot {
-                socket    :: Handle,
-                startTime :: ClockTime,
-                messages  :: TVar [String]
-            }
+        BotCommand {
+            cmdName     = "!credits",
+            cmd         = (\t u c -> (privmsgTo c "Programmed by DrAwesomeClaws"))
+        },
+
+        BotCommand {
+            cmdName     = "!say",
+            cmd         = (\t u c -> do
+                                        admin <- isAdmin u
+                                        let clean  = drop 1 . dropWhile (/= ':') . drop 1
+                                        let m = drop 4 (clean t)
+
+                                        if admin then privmsgTo c m 
+                                        else return ())
+        },
+
+        BotCommand {
+            cmdName     = "!uptime",
+            cmd         = (\t u c -> (uptime >>= (privmsgTo c)))
+        },
+
+        BotCommand {
+            cmdName     = "!help",
+            cmd         = (\t u c -> privmsgTo c "Commands: !help !uptime \
+                                                 \ !credits !source !say \
+                                                 \ !quit !listfeeds")
+        },
+
+        BotCommand {
+            cmdName     = "!source",
+            cmd         = (\t u c -> privmsgTo c "https://github.com/NucHorseStudios/HaskellDevBot")
+        }
+    ]
+
 
 io :: IO a -> Net a
 io = liftIO
@@ -81,18 +124,19 @@ startBot
         bracket (connect mv) disconnect loop 
         where
             disconnect = hClose . socket
-            loop st    = catch (runReaderT run st) (\(e :: IOException) -> return ()) 
+            loop st    = catch (runReaderT runBot st) (\(e :: IOException) -> return ()) 
 
 connect :: TVar [String] -> IO Bot
 connect mv
     = notify $ do
-        h  <- connectTo server $ PortNumber $ fromIntegral port
-        t  <- getClockTime
+        h   <- connectTo server $ PortNumber $ fromIntegral port
+        t   <- getClockTime
+        dbh <- connectDb "test.db"
 
         hSetBuffering h NoBuffering
         forkIO $ dispatchMessages h 1000000 mv
         mapM (spawnFeedProc h) feeds
-        return (Bot h t mv)
+        return (Bot h t mv dbh)
     
     where
         notify a = bracket_
@@ -111,12 +155,11 @@ connect mv
                 rt :: Int
                 rt = (feedRefreshTime fs) * 1000000
     
-
-run :: Net ()
-run 
+runBot :: Net ()
+runBot 
     = do
-        setNick     nick
-        setUser     (nick++" 0 * :haskelldev bot")
+        setNick     botNick
+        setUser     (botNick++" 0 * :haskelldev bot")
         joinChannel ircChannel
         asks socket >>= listen 
 
@@ -139,15 +182,6 @@ write s t
     
         io $ hPrintf h "%s %s\r\n" s t
         io $ printf    "> %s %s\n" s t
-
-setUser :: String -> Net ()
-setUser u = write "USER" u
-
-setNick :: String -> Net ()
-setNick n = write "NICK" n
-
-joinChannel :: String -> Net ()
-joinChannel ch = write "JOIN" ch
 
 addMessage :: TVar [String] -> String-> STM ()
 addMessage mv m
@@ -178,6 +212,63 @@ dispatchMessages h d mv
             
             waitAndRecur :: IO ()
             waitAndRecur = threadDelay d >> dispatchMessages h d mv
+
+eval :: String -> Net ()
+eval t 
+    = do
+        if (ping t) then (pong t)
+
+        else case (getCommand botCmd) of
+            Nothing  -> return ()
+            Just bc  -> (cmd bc) t ircUser chan
+        where
+            parseIrcCmd  = words t
+            clean        = drop 1 . dropWhile (/= ':') . drop 1
+            ircUser      = drop 1 (splitOn "!" (parseIrcCmd !! 0) !! 0)
+            chan         = if ((parseIrcCmd !! 2) == botNick) then ircUser else (parseIrcCmd !! 2) 
+            botCmd       = if null (words (clean t)) then "" else (words (clean t)) !! 0
+
+getCommand :: String -> Maybe BotCommand
+getCommand t 
+    = do
+        case (filter (isCmd t) botCommands) of 
+            []      -> Nothing 
+            (x:xs)  -> Just x 
+    where 
+        isCmd t bc = if (t == (cmdName bc)) then True else False
+
+
+isAdmin :: String -> Net Bool
+isAdmin u 
+    = do
+        dbh <- asks db
+        au  <- io $ getAccessGroupUsers dbh "admin"
+        
+        case (filter isUser au) of
+            []  -> return False
+            [x] -> return True 
+    
+    where
+        isUser :: User -> Bool
+        isUser a = ((nick a) == u)
+
+uptime :: Net String
+uptime 
+    = do
+        now  <- io getClockTime
+        zero <- asks startTime
+        return . prettytime $ diffClockTimes now zero
+
+prettytime :: TimeDiff -> String
+prettytime td = 
+    unwords $ map (uncurry (++) . first show) $
+    if null diffs then [(0,"s")] else diffs
+        where 
+            merge (tot, acc) (sec, typ) = let (sec',tot') = divMod tot sec
+                                          in (tot', (sec',typ):acc)
+            metrics = [(86400, "d"), (3600, "h"), (60, "m"), (1, "s")]
+            diffs   = filter ((/= 0) . fst) $ reverse $ snd $
+                      foldl' merge (tdSec td, []) metrics
 
 isWithin :: Int -> UTCTime -> UTCTime -> Bool
 isWithin i a b = (fromEnum $  (utcTimeToEpochTime a) - (utcTimeToEpochTime b)) < i
@@ -228,59 +319,6 @@ updateFeed h d fs fd mv
             waitAndRecur :: IO ()
             waitAndRecur = threadDelay d >> updateFeed h d fs fd mv
                 
-ping :: String -> Bool
-ping x = "PING :" `isPrefixOf` x
-
-pong :: String -> Net ()
-pong x = write "PONG" (':' : drop 6 x)
-
-eval :: String -> Net ()
-eval x =   
-    if (ping x) then (pong x)
-    else 
-    case cmdIs of
-        "!quit"     -> quitCmd
-        "!say"      -> sayCmd
-        "!uptime"   -> uptimeCmd 
-        "!credits"  -> creditsCmd
-        "!help"     -> helpCmd
-        "!source"   -> sourceCmd
-        _           -> ret
-    where
-        parseIrcCmd  = words x
-        clean        = drop 1 . dropWhile (/= ':') . drop 1
-        ircUser      = drop 1 (splitOn "!" (parseIrcCmd !! 0) !! 0)
-        chan         = if ((parseIrcCmd !! 2) == nick) then ircUser else (parseIrcCmd !! 2) 
-        botCmd       = clean x
-        cmdIs        = if (not $ null (words botCmd)) then (words botCmd !! 0) else ""
-        sayCmd       = if isAdmin then say else ret  
-        quitCmd      = if isAdmin then quitIrc else ret
-        uptimeCmd    = uptime >>= (privmsgTo chan)
-        creditsCmd   = privmsgTo chan "Programmed by DrAwesomeClaws."
-        helpCmd      = privmsgTo chan "Commands: !help !uptime !credits !source !say !quit !listfeeds"
-        sourceCmd    = privmsgTo chan "https://github.com/NucHorseStudios/HaskellDevBot"
-        say          = privmsgTo chan $ drop 4 botCmd
-        isAdmin      = (ircUser `elem` admins)
-        ret          = return ()
-                                        
-uptime :: Net String
-uptime 
-    = do
-        now  <- io getClockTime
-        zero <- asks startTime
-        return . prettytime $ diffClockTimes now zero
-
-prettytime :: TimeDiff -> String
-prettytime td = 
-    unwords $ map (uncurry (++) . first show) $
-    if null diffs then [(0,"s")] else diffs
-        where 
-            merge (tot, acc) (sec, typ) = let (sec',tot') = divMod tot sec
-                                          in (tot', (sec',typ):acc)
-            metrics = [(86400, "d"), (3600, "h"), (60, "m"), (1, "s")]
-            diffs   = filter ((/= 0) . fst) $ reverse $ snd $
-                      foldl' merge (tdSec td, []) metrics
-
 writeFeedData :: Handle -> TVar [String] -> [FeedData] -> IO [()]
 writeFeedData h mv f 
     = do
@@ -292,8 +330,20 @@ writeFeedData h mv f
         text x      = (feedItemTitle x)
         url  x      = take (39 + (length $ name x)) (feedItemUrl x) 
 
-quitIrc :: Net ()
-quitIrc = write "QUIT" ":Exiting" >> io (exitWith ExitSuccess)
+ping :: String -> Bool
+ping x = "PING :" `isPrefixOf` x
+
+pong :: String -> Net ()
+pong x = write "PONG" (':' : drop 6 x)
+
+setUser :: String -> Net ()
+setUser u = write "USER" u
+
+setNick :: String -> Net ()
+setNick n = write "NICK" n
+
+joinChannel :: String -> Net ()
+joinChannel ch = write "JOIN" ch
 
 privmsg :: String -> Net ()
 privmsg text = privmsgTo ircChannel text
