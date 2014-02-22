@@ -55,10 +55,11 @@ botCommands =
             cmdName     = "!say",
             cmd         = (\t u c -> do
                                         admin <- isAdmin u
-                                        let clean  = drop 1 . dropWhile (/= ':') . drop 1
+                                        io $ putStrLn $ "Saying: " ++ t
+                                        let clean  = drop 1 . unwords . drop 3 . words  
                                         let m = drop 4 (clean t)
 
-                                        if admin then privmsgTo c m 
+                                        if admin then ((io $ putStrLn "Admin") >> privmsgTo c m) 
                                         else return ())
         },
 
@@ -204,7 +205,7 @@ eval t
             parseIrcCmd  = words t
 
             clean :: String -> String
-            clean        = drop 1 . dropWhile (/= ':') . drop 1
+            clean        = drop 1 . unwords . drop 3 . words 
             
             ircUser :: String
             ircUser      = drop 1 (splitOn "!" (parseIrcCmd !! 0) !! 0)

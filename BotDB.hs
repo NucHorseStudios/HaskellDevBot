@@ -25,7 +25,7 @@ prepDB dbh
                         \ nick TEXT NOT NULL UNIQUE,\ 
                         \ last_seen INTEGER NOT NULL)" []
 
-            run    dbh ("INSERT INTO users (nick, last_seen) values ('" ++ master ++ "', 0)") []
+            run    dbh ("INSERT INTO users (nick, last_seen) values ('DrAwesomeClaws', 0)") []
 
             return ()
         
