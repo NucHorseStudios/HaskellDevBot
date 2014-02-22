@@ -41,10 +41,9 @@ botCommands =
             cmdName     = "!quit",
             cmd         = (\t u c -> do 
                                         admin       <- isAdmin u
+                                        privmsgTo "NickServ" ("Acc " ++ u)
                                         identified  <- isIdentified u
                                         
-                                        privmsgTo "NickServ" ("Acc " ++ u)
-
                                         if admin && identified
                                         then (write "QUIT" ":Exiting" >> io (exitWith ExitSuccess)) 
                                         else return ())
@@ -59,13 +58,11 @@ botCommands =
             cmdName     = "!say",
             cmd         = (\t u c -> do
                                         admin       <- isAdmin u
+                                        privmsgTo  "NickServ" ("ACC " ++ u)
                                         identified  <- isIdentified u
                                         
-                                        privmsgTo  "NickServ" ("ACC " ++ u)
-                                        let m = drop 4 (clean t)
-
                                         if admin && identified
-                                        then privmsgTo c m 
+                                        then privmsgTo c (drop 4 (clean t)) 
                                         else return ())
         },
 
