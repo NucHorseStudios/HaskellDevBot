@@ -40,8 +40,12 @@ botCommands =
         BotCommand {
             cmdName     = "!quit",
             cmd         = (\t u c -> do 
-                                        admin <- isAdmin u
-                                        if admin 
+                                        admin       <- isAdmin u
+                                        identified  <- isIdentified u
+                                        
+                                        privmsgTo "NickServ" ("Acc " ++ u)
+
+                                        if admin && identified
                                         then (write "QUIT" ":Exiting" >> io (exitWith ExitSuccess)) 
                                         else return ())
         },
@@ -54,12 +58,14 @@ botCommands =
         BotCommand {
             cmdName     = "!say",
             cmd         = (\t u c -> do
-                                        admin <- isAdmin u
-                                        io $ putStrLn $ "Saying: " ++ t
-                                        let clean  = drop 1 . unwords . drop 3 . words  
+                                        admin       <- isAdmin u
+                                        identified  <- isIdentified u
+                                        
+                                        privmsgTo  "NickServ" ("ACC " ++ u)
                                         let m = drop 4 (clean t)
 
-                                        if admin then ((io $ putStrLn "Admin") >> privmsgTo c m) 
+                                        if admin && identified
+                                        then privmsgTo c m 
                                         else return ())
         },
 
@@ -202,19 +208,16 @@ eval t
             Just bc  -> io $ forkIO $ runReaderT ((cmd bc) t ircUser chan) st 
         where
             parseIrcCmd :: [String]
-            parseIrcCmd  = words t
+            parseIrcCmd = words t
 
-            clean :: String -> String
-            clean        = drop 1 . unwords . drop 3 . words 
-            
             ircUser :: String
-            ircUser      = drop 1 (splitOn "!" (parseIrcCmd !! 0) !! 0)
+            ircUser = drop 1 (splitOn "!" (parseIrcCmd !! 0) !! 0)
             
             chan :: String
-            chan         = if ((parseIrcCmd !! 2) == botNick) then ircUser else (parseIrcCmd !! 2) 
+            chan = if ((parseIrcCmd !! 2) == botNick) then ircUser else (parseIrcCmd !! 2) 
             
             botCmd :: String
-            botCmd       = if null (words (clean t)) then "" else (words (clean t)) !! 0
+            botCmd = if null (words (clean t)) then "" else (words (clean t)) !! 0
 
 getCommand :: String -> Maybe BotCommand
 getCommand t 
@@ -225,6 +228,27 @@ getCommand t
     where 
         isCmd t bc = if (t == (cmdName bc)) then True else False
 
+
+isIdentified :: String -> Net Bool
+isIdentified u
+    = do
+        h  <- asks socket 
+        r  <- io $ timeout fiveSeconds (waitForResp h)
+        case r of 
+            Nothing  -> return False
+            Just x   -> return x 
+    where 
+        fiveSeconds = 5 * 1000000
+        waitForResp h
+            = do
+                s <- init `fmap` (hGetLine h) 
+
+                if (u ++ " ACC 3") `isPrefixOf` (clean s)
+                then return True 
+                else waitForResp h
+
+clean :: String -> String
+clean = drop 1 . unwords . drop 3 . words
 
 isAdmin :: String -> Net Bool
 isAdmin u 
