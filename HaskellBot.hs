@@ -23,6 +23,7 @@ import Data.List.Split
 import Data.List.Utils
 import Data.Char
 import Data.Time
+import Data.Maybe
 import Data.Time.Parse
 import Data.Convertible (convert)
 import System.Posix.Types (EpochTime(..))
@@ -41,10 +42,8 @@ botCommands =
             cmdName     = "!quit",
             cmd         = (\t u c -> do 
                                         admin       <- isAdmin u
-                                        privmsgTo "NickServ" ("Acc " ++ u)
-                                        identified  <- isIdentified u
                                         
-                                        if admin && identified
+                                        if admin
                                         then (write "QUIT" ":Exiting" >> io (exitWith ExitSuccess)) 
                                         else return ())
         },
@@ -58,10 +57,8 @@ botCommands =
             cmdName     = "!say",
             cmd         = (\t u c -> do
                                         admin       <- isAdmin u
-                                        privmsgTo  "NickServ" ("ACC " ++ u)
-                                        identified  <- isIdentified u
                                         
-                                        if admin && identified
+                                        if admin 
                                         then privmsgTo c (drop 4 (clean t)) 
                                         else return ())
         },
@@ -81,6 +78,65 @@ botCommands =
         BotCommand {
             cmdName     = "!source",
             cmd         = (\t u c -> privmsgTo c "https://github.com/NucHorseStudios/HaskellDevBot")
+        },
+
+        BotCommand {
+            cmdName     = "!admin",
+            cmd         = (\t u c
+                            -> do
+                                admin <- isAdmin u
+
+                                let msg  = words . drop 7 . clean $ t
+                                let com  =  if null msg
+                                            then Nothing 
+                                            else Just $ msg !! 0
+                                let user =  if null msg || length msg < 2
+                                            then Nothing 
+                                            else Just $ msg !! 1
+
+                                case (user, com) of
+                                     (Just n, Just c) -> 
+                                        case c of 
+                                            "add"    -> addAdminUser n
+                                            "remove" -> removeAdminUser n
+                                            _        -> io $ return ()
+                                     (_, _)          -> io $ return ())
+        },
+
+        BotCommand {
+            cmdName     = "!adminadd",
+            cmd         = (\t u c 
+                            -> do
+                                admin <- isAdmin u
+
+                                let msg  = words . drop 10 . clean
+                                let user =  if null (msg t) 
+                                    then Nothing
+                                    else Just $ (msg t) !! 0
+                                
+                                if not admin 
+                                then io $ return ()
+                                else case user of 
+                                        Nothing  -> io $ return ()
+                                        Just n   -> addAdminUser n)
+        },
+
+        BotCommand {
+            cmdName     = "!adminremove",
+            cmd         = (\t u c 
+                            -> do
+                                admin <- isAdmin u
+                                
+                                let msg = words . drop 13 . clean
+                                let user = if null (msg t)
+                                    then Nothing 
+                                    else Just $ (msg t) !! 0
+
+                                if not admin
+                                then io $ return ()
+                                else case user of
+                                        Nothing -> io $ return ()
+                                        Just n  -> removeAdminUser n)
         }
     ]
 
@@ -253,14 +309,40 @@ isAdmin u
         dbh <- asks db
         au  <- io $ getAccessGroupUsers dbh "admin"
         
-        case (filter isUser au) of
-            []  -> return False
-            [x] -> return True 
+        privmsgTo "NickServ" ("ACC " ++ u)
+        identified <- isIdentified u
+        
+        case au of 
+            Nothing -> return False
+            Just au 
+                -> case (filter isUser au) of
+                    []  -> return False
+                    [x] -> return identified
     
     where
         isUser :: User -> Bool
         isUser a = ((nick a) == u)
 
+removeAdminUser :: String -> Net ()
+removeAdminUser n
+    = do
+        dbh <- asks db
+        g   <- io $ getGroupByName dbh "admin"
+        au  <- io $ (getUser dbh n)
+        
+        case au of
+            Nothing -> io $ return ()
+            Just u  -> io $ removeUserFromAccessGroup dbh u (fromJust g)
+
+addAdminUser :: String -> Net ()
+addAdminUser n
+    = do
+        dbh <- asks db
+        g   <- io $ getGroupByName dbh "admin"
+        au  <- io $ (addUser dbh n 0) 
+        
+        io $ addUserToAccessGroup dbh (fromJust au) (fromJust g)
+        
 uptime :: Net String
 uptime 
     = do

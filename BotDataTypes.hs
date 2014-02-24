@@ -22,6 +22,12 @@ data User =
         lastSeen :: Integer
      }
 
+data AccessGroup =
+     AccessGroup {
+        accessGroupId :: Integer,
+        groupName :: String
+     }
+
 data BotCommand = 
      BotCommand {
         cmdName  :: String,

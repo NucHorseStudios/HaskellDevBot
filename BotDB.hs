@@ -51,46 +51,89 @@ prepDB dbh
         
         commit dbh
 
-addUser :: IConnection c => c -> User -> Integer -> IO User
+addUser :: IConnection c => c -> String -> Integer -> IO (Maybe User)
 addUser dbh u ls
     = do 
-        handleSql errorHandler $ (run dbh insertQuery [toSql (nick u), toSql (ls)])
-
-        getUser dbh (nick u)
+        user <- getUser dbh u
+        case user of 
+            Nothing ->  handleSql errorHandler $ (run dbh insertQuery [toSql u, toSql ls]) >>
+                        commit dbh >>
+                        getUser dbh u
+            _       ->  getUser dbh u
     where 
         errorHandler e  = (fail $ failMessage e)
         failMessage  e  = "Error adding user"  ++ ": " ++ show e 
         insertQuery     = "INSERT INTO users (nick, last_seen) VALUES (?, ?)"
 
 
-getUser :: IConnection c => c -> String -> IO User
+getUser :: IConnection c => c -> String -> IO (Maybe User)
 getUser dbh un 
     = do 
         r <- quickQuery' dbh selectQuery [toSql un]
 
         case r of 
-            [[uId, uNick, uLs]] -> return $ User { 
+            [[uId, uNick, uLs]] -> return $ Just $ User { 
                                                 userId   = (fromSql uId), 
                                                 nick     = (fromSql uNick),
                                                 lastSeen = (fromSql uLs) 
                                             }
-            e                   -> fail $ failMessage e
+            e                   -> return Nothing
     where 
         failMessage  e  = "Error adding user"  ++ ": " ++ show e
         selectQuery     = "SELECT user_id, nick, last_seen FROM users WHERE nick = ?" 
 
-getAccessGroupUsers :: IConnection c => c -> String -> IO [User]
+getAccessGroupUsers :: IConnection c => c -> String -> IO (Maybe [User])
 getAccessGroupUsers dbh gn 
     = do 
         r <- quickQuery' dbh selectQuery [toSql gn]
-
-        return (map convertToUser r)
+        case r of 
+            [] -> return $ Nothing
+            _  -> return $ Just $ map convertToUser r
     where 
         selectQuery = "SELECT u.user_id, u.nick, u.last_seen \
                         \ FROM users u, access_groups ag, user_access_groups uag \
                         \ WHERE ag.name = ? \
                             \ AND uag.access_group_id = ag.access_group_id \
                             \ AND uag.user_id = u.user_id"
+
+getGroupByName :: IConnection c => c -> String -> IO (Maybe AccessGroup)
+getGroupByName dbh gn
+    = do
+        g <- quickQuery' dbh selectQuery [toSql gn] 
+        
+        case g of 
+            []  -> return Nothing
+            [x] -> return $ Just $ convertToGroup (head g)
+    where 
+        selectQuery = "SELECT access_group_id, name FROM access_groups WHERE name = ?"
+
+addUserToAccessGroup :: IConnection c => c -> User -> AccessGroup -> IO ()
+addUserToAccessGroup dbh u g
+    = do
+        gu <- getAccessGroupUsers dbh (groupName g)
+        
+        case gu of 
+            Nothing -> return ()
+            Just uu -> case (filter (\usr -> (nick usr) == (nick u)) uu) of
+                        []  ->  (runQuery (userId u) (accessGroupId g)) >> commit dbh 
+                        _   ->  return ()
+    where 
+        insertQuery = "INSERT INTO user_access_groups (user_id, access_group_id) VALUES (?, ?)"
+        runQuery uid gid =  run dbh insertQuery [toSql uid, toSql gid]
+
+removeUserFromAccessGroup :: IConnection c => c -> User -> AccessGroup -> IO ()
+removeUserFromAccessGroup dbh u g
+    = do 
+        runQuery (userId u) (accessGroupId g) >> commit dbh >> return ()
+    where 
+        removeQuery      = "DELETE FROM user_access_groups WHERE user_id = ? AND access_group_id = ?"
+        runQuery uid gid = run dbh removeQuery [toSql uid, toSql gid]
+
+convertToGroup [gId, gName]
+    = AccessGroup {
+        accessGroupId = fromSql gId,
+        groupName = fromSql gName
+    }
 
 convertToUser [uId, uNick, uLs]
     = User { 

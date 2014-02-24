@@ -2,10 +2,10 @@ module BotConfig where
 
 import FeedTypes
 
-server      = "irc.freenode.org"
+server      = "banks.freenode.net"
 port        = 6667
 ircChannel  = "##hb-testing"
-botNick     = "GamedevBotT"
+botNick     = "GamedevBotTT"
 master      = "DrAwesomeClaws"
 feeds       =   [
                     FeedSource { 
