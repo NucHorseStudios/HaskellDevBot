@@ -87,9 +87,11 @@ botCommands =
                                 admin <- isAdmin u
 
                                 let msg  = words . drop 7 . clean $ t
+                                
                                 let com  =  if null msg
                                             then Nothing 
                                             else Just $ msg !! 0
+
                                 let user =  if null msg || length msg < 2
                                             then Nothing 
                                             else Just $ msg !! 1
@@ -100,43 +102,32 @@ botCommands =
                                             "add"    -> addAdminUser n
                                             "remove" -> removeAdminUser n
                                             _        -> io $ return ()
-                                     (_, _)          -> io $ return ())
+                                     (_,_)           -> io $ return ())
         },
 
         BotCommand {
-            cmdName     = "!adminadd",
+            cmdName     = "!notify",
             cmd         = (\t u c 
-                            -> do
-                                admin <- isAdmin u
+                            -> do 
+                                let msg = words . drop 7 . clean $ t
 
-                                let msg  = words . drop 10 . clean
-                                let user =  if null (msg t) 
-                                    then Nothing
-                                    else Just $ (msg t) !! 0
-                                
-                                if not admin 
-                                then io $ return ()
-                                else case user of 
-                                        Nothing  -> io $ return ()
-                                        Just n   -> addAdminUser n)
-        },
+                                let com =   if null msg
+                                            then Nothing
+                                            else Just $ msg !! 0
 
-        BotCommand {
-            cmdName     = "!adminremove",
-            cmd         = (\t u c 
-                            -> do
-                                admin <- isAdmin u
-                                
-                                let msg = words . drop 13 . clean
-                                let user = if null (msg t)
-                                    then Nothing 
-                                    else Just $ (msg t) !! 0
+                                let feedn = if null msg || length msg < 2
+                                            then Nothing
+                                            else Just $ msg !! 1
 
-                                if not admin
-                                then io $ return ()
-                                else case user of
-                                        Nothing -> io $ return ()
-                                        Just n  -> removeAdminUser n)
+                                io $ putStrLn "Notify"
+
+                                case (com, feedn) of
+                                    (Just c, Just fn) -> 
+                                        case c of 
+                                            "on"    -> startNotify u fn
+                                            "stop"  -> stopNotify  u fn
+                                            _       -> io $ return ()
+                                    (_,_)           -> io $ return ())
         }
     ]
 
@@ -167,13 +158,14 @@ startBot
 connect :: TVar [String] -> IO Bot
 connect mv
     = notify $ do
-        h   <- connectTo server $ PortNumber $ fromIntegral port
-        t   <- getClockTime
-        dbh <- connectDb "haskellbot.db"
+        h     <- connectTo server $ PortNumber $ fromIntegral port
+        t     <- getClockTime
+        dbh   <- connectDb "haskellbot.db"
+        feeds <- getFeeds dbh
 
         hSetBuffering h NoBuffering
         forkIO $ dispatchMessages h 1000000 mv
-        mapM (spawnFeedProc h) feeds
+        mapM ((spawnFeedProc dbh) h) feeds
         return (Bot h t mv dbh)
     
     where
@@ -182,12 +174,12 @@ connect mv
             (putStrLn "done.")
             a
 
-        spawnFeedProc :: Handle -> FeedSource -> IO (ThreadId)
-        spawnFeedProc h fs 
+        spawnFeedProc :: IConnection c => c -> Handle -> FeedSource -> IO (ThreadId)
+        spawnFeedProc dbh h fs 
             = do
                 fd <- atomically $ newTVar ([] :: [FeedData]) 
 
-                forkIO $ updateFeed h rt fs fd mv
+                forkIO $ updateFeed dbh h rt fs fd mv
             
             where
                 rt :: Int
@@ -330,7 +322,9 @@ removeAdminUser n
         g   <- io $ getGroupByName dbh "admin"
         au  <- io $ (getUser dbh n)
         
-        case au of
+        if n == master 
+        then io $ return ()
+        else case au of
             Nothing -> io $ return ()
             Just u  -> io $ removeUserFromAccessGroup dbh u (fromJust g)
 
@@ -342,7 +336,30 @@ addAdminUser n
         au  <- io $ (addUser dbh n 0) 
         
         io $ addUserToAccessGroup dbh (fromJust au) (fromJust g)
-        
+
+
+stopNotify :: String -> String -> Net ()
+stopNotify u fn 
+    = do
+        dbh <- asks db
+        usr <- io $ getUser dbh u
+        fd  <- io $ getFeed dbh (read fn :: Int) 
+
+        case (usr, fd) of
+            (Just usr, Just fd) -> io $ stopNotificationsFor dbh usr fd
+            (_,_)               -> io $ return ()
+
+startNotify :: String -> String -> Net ()
+startNotify u fn 
+    = do
+        dbh <- asks db
+        usr <- io $ getUser dbh u
+        fd  <- io $ getFeed dbh (read fn :: Int) 
+
+        case (usr, fd) of
+            (Just usr, Just fd) -> io $ startNotificationsFor dbh usr fd
+            (_,_)               -> io $ return ()
+
 uptime :: Net String
 uptime 
     = do
@@ -374,8 +391,8 @@ replaceFeedData ftv nd
         writeTVar ftv nd
         return od
 
-updateFeed :: Handle -> Int -> FeedSource -> TVar [FeedData] -> TVar [String] -> IO ()
-updateFeed h d fs fd mv
+updateFeed :: IConnection c => c -> Handle -> Int -> FeedSource -> TVar [FeedData] -> TVar [String] -> IO ()
+updateFeed dbh h d fs fd mv
     = do
         nd   <- getFeedData fs
         
@@ -389,7 +406,7 @@ updateFeed h d fs fd mv
 
                     if null od 
                     then waitAndRecur
-                    else (writeFeedData h mv (getNewItems od d)) >> waitAndRecur
+                    else (writeFeedData dbh h mv (getNewItems od d)) >> waitAndRecur
 
         where
             getNewItems :: [FeedData] -> [FeedData] -> [FeedData]
@@ -408,15 +425,21 @@ updateFeed h d fs fd mv
             parseToUTC = (readTime defaultTimeLocale "%a, %d %b %Y %H:%M:%S %z")
        
             waitAndRecur :: IO ()
-            waitAndRecur = threadDelay d >> updateFeed h d fs fd mv
+            waitAndRecur = threadDelay d >> updateFeed dbh h d fs fd mv
                 
-writeFeedData :: Handle -> TVar [String] -> [FeedData] -> IO [()]
-writeFeedData h mv f 
+writeFeedData :: IConnection c => c -> Handle -> TVar [String] -> [FeedData] -> IO [()]
+writeFeedData dbh h mv f 
     = do
         writeItem `mapM` f
     where 
-        writeItem x = atomically $ addMessage mv (m x)
-        m    x      = ircChannel ++ " : " ++ name x ++ ": " ++ text x ++ " <" ++ url x ++ ">"
+        writeItem x = do
+                        usrs <- notifiedUsers dbh (feedItemSource x)
+                        mapM (\u -> (sendTo (nick u) x)) usrs
+                        atomically $ addMessage mv (m ircChannel x)
+                        return ()
+
+        m  w x      = w ++ " : " ++ name x ++ ": " ++ text x ++ " <" ++ url x ++ ">"
+        sendTo w x  = atomically $ addMessage mv (m w x)
         name x      = (feedName (feedItemSource x))
         text x      = (feedItemTitle x)
         url  x      = take (39 + (length $ name x)) (feedItemUrl x) 

@@ -6,6 +6,7 @@ import Database.HDBC.Sqlite3
 import Data.List (sort)
 import BotDataTypes 
 import BotConfig
+import FeedTypes
 
 connectDb :: FilePath -> IO Connection
 connectDb fp 
@@ -48,7 +49,35 @@ prepDB dbh
             run    dbh "INSERT INTO user_access_groups (user_id, access_group_id) VALUES (1, 1)" []
 
             return ()
-        
+
+        when (not ("feedsources" `elem` tables)) $ do
+            run dbh "CREATE TABLE feedsources (\
+                        \ feed_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \
+                        \ name TEXT NOT NULL UNIQUE, \
+                        \ refresh_time INTEGER NOT NULL, \
+                        \ url TEXT NOT NULL)" []
+            
+            run dbh " INSERT INTO feedsources \
+                        \ (name, refresh_time, url) \
+                    \ VALUES ('r/gamedev', 30, 'http://www.reddit.com/r/gamedev/new/.rss')" []
+    
+            run dbh " INSERT INTO feedsources \
+                        \ (name, refresh_time, url) \
+                    \ VALUES ('r/truegamedev', 30, 'http://www.reddit.com/r/truegamedev/new/.rss')" []
+            
+            run dbh " INSERT INTO feedsources \
+                        \ (name, refresh_time, url) \
+                    \ VALUES ('r/gamedevbottesting', 10, 'http://www.reddit.com/r/gamedevbottesting/new/.rss')" []
+            
+            return ()
+        when (not ("feedpost_notifications" `elem` tables)) $ do
+            run dbh " CREATE TABLE feedpost_notifications (\
+                        \ notification_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \
+                        \ feed_id INTEGER NOT NULL, \
+                        \ user_id INTEGER NOT NULL, \
+                        \ UNIQUE (feed_id, user_id) ON CONFLICT REPLACE)" []
+
+            return ()
         commit dbh
 
 addUser :: IConnection c => c -> String -> Integer -> IO (Maybe User)
@@ -128,6 +157,70 @@ removeUserFromAccessGroup dbh u g
     where 
         removeQuery      = "DELETE FROM user_access_groups WHERE user_id = ? AND access_group_id = ?"
         runQuery uid gid = run dbh removeQuery [toSql uid, toSql gid]
+
+startNotificationsFor :: IConnection c => c -> User -> FeedSource -> IO ()
+startNotificationsFor dbh u fs 
+    = do
+        putStrLn "On"
+        runQuery (feedId fs) (userId u) >> commit dbh
+
+    where
+        insertQuery = "INSERT INTO feedpost_notifications (feed_id, user_id) VALUES (?, ?)"
+        runQuery fid uid = run dbh insertQuery [toSql fid, toSql uid]
+
+stopNotificationsFor :: IConnection c => c -> User -> FeedSource -> IO ()
+stopNotificationsFor dbh u fs 
+    = do
+        putStrLn "Stop"
+        runQuery (feedId fs) (userId u) >> commit dbh
+
+    where
+        deleteQuery = "DELETE FROM feedpost_notifications WHERE feed_id = ? AND user_id = ?"
+        runQuery fid uid = run dbh deleteQuery [toSql fid, toSql uid]
+        
+notifiedUsers :: IConnection c => c -> FeedSource -> IO ([User])
+notifiedUsers dbh fs
+    = do
+        r <- quickQuery' dbh selectQuery [toSql (feedId fs)]
+        
+        case r of 
+            []      -> return ([] :: [User])
+            x       -> return $ map convertToUser x 
+    where 
+        selectQuery = "SELECT u.user_id, u.nick, u.last_seen \
+                        \ FROM users u, feedpost_notifications fpn \
+                        \ WHERE fpn.user_id = u.user_id AND fpn.feed_id = ?"
+
+getFeeds :: IConnection c => c -> IO ([FeedSource])
+getFeeds dbh
+    = do
+        r <- quickQuery' dbh selectQuery []
+        
+        case r of 
+            []  -> return $ ([] :: [FeedSource])
+            x   -> return $ map convertToFeedSource x 
+    where 
+        selectQuery = "SELECT feed_id, name, refresh_time, url FROM feedsources"
+
+getFeed :: IConnection c => c -> Int -> IO (Maybe FeedSource)
+getFeed dbh id 
+    = do
+        r <- quickQuery' dbh selectQuery [(toSql id)]
+        
+        case r of 
+            []     -> return $ Nothing
+            (x:xs) -> return $ Just $ convertToFeedSource x
+    where
+        selectQuery =   " SELECT feed_id, name, refresh_time, url \
+                        \ FROM feedsources WHERE feed_id = ?"
+
+convertToFeedSource [fId, fn, rt, u]
+    = FeedSource {
+        feedId = fromSql fId,
+        feedName = fromSql fn,
+        feedRefreshTime = fromSql rt,
+        feedUrl = fromSql u
+    }
 
 convertToGroup [gId, gName]
     = AccessGroup {

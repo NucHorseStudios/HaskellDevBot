@@ -2,6 +2,7 @@ module FeedTypes where
 
 data FeedSource =
     FeedSource {
+        feedId :: Int,
         feedName :: String,
         feedRefreshTime :: Int,
         feedUrl  :: String
