@@ -4,6 +4,8 @@ import Control.Monad (when)
 import Database.HDBC
 import Database.HDBC.Sqlite3 
 import Data.List (sort)
+import Data.List.Utils
+import Data.Maybe
 import BotDataTypes 
 import BotConfig
 import FeedTypes
@@ -21,18 +23,18 @@ prepDB dbh
         tables <- getTables dbh
         
         when (not ("users" `elem` tables)) $ do 
-            run dbh "CREATE TABLE users (\
-                        \ user_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,\ 
-                        \ nick TEXT NOT NULL UNIQUE,\ 
+            run dbh "CREATE TABLE users ( \
+                        \ user_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \ 
+                        \ nick TEXT NOT NULL UNIQUE, \ 
                         \ last_seen INTEGER NOT NULL)" []
 
-            run    dbh ("INSERT INTO users (nick, last_seen) values ('DrAwesomeClaws', 0)") []
+            run    dbh ("INSERT INTO users (nick, last_seen) values ('" ++ master ++ "', 0)") []
 
             return ()
         
         when (not ("access_groups" `elem` tables)) $ do
-            run dbh "CREATE TABLE access_groups (\
-                        \ access_group_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,\  
+            run dbh "CREATE TABLE access_groups ( \
+                        \ access_group_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \   
                         \ name TEXT NOT NULL UNIQUE)" []
 
             run    dbh "INSERT INTO access_groups (name) values ('admin')" []
@@ -41,17 +43,18 @@ prepDB dbh
             return ()
 
         when (not ("user_access_groups" `elem` tables)) $ do
-            run dbh "CREATE TABLE user_access_groups (\
-                        \ user_access_group_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,\
-                        \ user_id INTEGER NOT NULL,\
-                        \ access_group_id INTEGER NOT NULL)" []
+            run dbh "CREATE TABLE user_access_groups ( \
+                        \ user_access_group_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \
+                        \ user_id INTEGER NOT NULL, \
+                        \ access_group_id INTEGER NOT NULL, \
+                        \ UNIQUE (user_id, access_group_id) ON CONFLICT IGNORE)" []
 
             run    dbh "INSERT INTO user_access_groups (user_id, access_group_id) VALUES (1, 1)" []
 
             return ()
 
         when (not ("feedsources" `elem` tables)) $ do
-            run dbh "CREATE TABLE feedsources (\
+            run dbh "CREATE TABLE feedsources ( \
                         \ feed_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \
                         \ name TEXT NOT NULL UNIQUE, \
                         \ refresh_time INTEGER NOT NULL, \
@@ -70,30 +73,54 @@ prepDB dbh
                     \ VALUES ('r/gamedevbottesting', 10, 'http://www.reddit.com/r/gamedevbottesting/new/.rss')" []
             
             return ()
+
+        when (not ("feed_data" `elem` tables)) $ do
+            run dbh "CREATE TABLE feed_data ( \
+                        \ data_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \
+                        \ title TEXT, \
+                        \ pub_date TEXT, \
+                        \ feedsource_id INTEGER NOT NULL, \
+                        \ post_text TEXT, \
+                        \ url TEXT UNIQUE, \
+                        \ dispatched INTEGER DEFAULT 0, \
+                        \ UNIQUE (title, pub_date, feedsource_id, url) ON CONFLICT IGNORE)" []
+            return ()
+
         when (not ("feedpost_notifications" `elem` tables)) $ do
-            run dbh " CREATE TABLE feedpost_notifications (\
+            run dbh " CREATE TABLE feedpost_notifications ( \
                         \ notification_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \
                         \ feed_id INTEGER NOT NULL, \
                         \ user_id INTEGER NOT NULL, \
                         \ UNIQUE (feed_id, user_id) ON CONFLICT REPLACE)" []
 
             return ()
+
         commit dbh
 
-addUser :: IConnection c => c -> String -> Integer -> IO (Maybe User)
+
+addUser :: IConnection c => c -> String -> Int -> IO (Maybe User)
 addUser dbh u ls
     = do 
         user <- getUser dbh u
         case user of 
-            Nothing ->  handleSql errorHandler $ (run dbh insertQuery [toSql u, toSql ls]) >>
-                        commit dbh >>
-                        getUser dbh u
-            _       ->  getUser dbh u
+            Nothing ->  handleSql errorHandler $ run dbh insertQuery [toSql u, toSql ls]
+            _       ->  handleSql errorHandler $ run dbh updateQuery [toSql ls, toSql u]
+        commit dbh 
+        getUser dbh u
     where 
         errorHandler e  = (fail $ failMessage e)
         failMessage  e  = "Error adding user"  ++ ": " ++ show e 
         insertQuery     = "INSERT INTO users (nick, last_seen) VALUES (?, ?)"
+        updateQuery     = "UPDATE users SET last_seen = ? WHERE nick = ?"
 
+
+addUser_ :: IConnection c => c -> String -> Int -> IO ()
+addUser_ dbh u ls
+    = do 
+        user <- addUser dbh u ls
+
+        case user of 
+            _ -> return ()
 
 getUser :: IConnection c => c -> String -> IO (Maybe User)
 getUser dbh un 
@@ -136,6 +163,35 @@ getGroupByName dbh gn
     where 
         selectQuery = "SELECT access_group_id, name FROM access_groups WHERE name = ?"
 
+addFeedData :: IConnection c => c -> [FeedData] -> IO ()
+addFeedData dbh fd 
+    = do
+        mapM insertData fd
+        commit dbh
+    where
+        insertData d = runQuery (feedItemTitle d) (feedItemPubDate d) (feedId (feedItemSource d)) (feedItemUrl d)
+        insertQuery = "INSERT INTO feed_data (title, pub_date, feedsource_id, url) VALUES(?, ?, ?, ?)"
+        runQuery t pd fsid u = run dbh insertQuery [toSql t, toSql pd, toSql fsid, toSql u]
+
+getNewFeedData :: IConnection c => c -> FeedSource -> IO ([FeedData])
+getNewFeedData dbh fs
+    = do 
+        nd  <- quickQuery' dbh selectQuery [toSql (feedId fs)] 
+        return $ map (convertToFeedData fs) nd
+    where
+        selectQuery = "SELECT data_id, title, pub_date, url \
+                        \ FROM feed_data WHERE dispatched=0 AND feedsource_id = ?"
+        
+setDataDispatched :: IConnection c => c -> [FeedData] -> IO ()
+setDataDispatched dbh fd
+    = do
+        run dbh updateQuery []
+        commit dbh
+    where
+        updateQuery = "UPDATE feed_data SET dispatched = 1 WHERE data_id IN (" ++ (join ", " ids) ++ ")"
+        ids         = map feedId fd
+        feedId d    = show (feedItemId d)
+        
 addUserToAccessGroup :: IConnection c => c -> User -> AccessGroup -> IO ()
 addUserToAccessGroup dbh u g
     = do
@@ -186,7 +242,7 @@ notifiedUsers dbh fs
         case r of 
             []      -> return ([] :: [User])
             x       -> return $ map convertToUser x 
-    where 
+    where
         selectQuery = "SELECT u.user_id, u.nick, u.last_seen \
                         \ FROM users u, feedpost_notifications fpn \
                         \ WHERE fpn.user_id = u.user_id AND fpn.feed_id = ?"
@@ -207,7 +263,7 @@ getFeed dbh id
     = do
         r <- quickQuery' dbh selectQuery [(toSql id)]
         
-        case r of 
+        case r of
             []     -> return $ Nothing
             (x:xs) -> return $ Just $ convertToFeedSource x
     where
@@ -215,22 +271,31 @@ getFeed dbh id
                         \ FROM feedsources WHERE feed_id = ?"
 
 convertToFeedSource [fId, fn, rt, u]
-    = FeedSource {
-        feedId = fromSql fId,
-        feedName = fromSql fn,
-        feedRefreshTime = fromSql rt,
-        feedUrl = fromSql u
-    }
+    =   FeedSource {
+            feedId = fromSql fId,
+            feedName = fromSql fn,
+            feedRefreshTime = fromSql rt,
+            feedUrl = fromSql u
+        }
+
+convertToFeedData fs [fdId, fdTitle, fdPd, fdUrl]
+    =   FeedData {
+            feedItemId      = fromSql fdId,
+            feedItemTitle   = fromSql fdTitle,
+            feedItemPubDate = fromSql fdPd,
+            feedItemSource  = fs,
+            feedItemUrl     = fromSql fdUrl
+        }
 
 convertToGroup [gId, gName]
-    = AccessGroup {
-        accessGroupId = fromSql gId,
-        groupName = fromSql gName
-    }
+    =   AccessGroup {
+            accessGroupId = fromSql gId,
+            groupName = fromSql gName
+        }
 
 convertToUser [uId, uNick, uLs]
-    = User { 
-        userId   = fromSql uId,
-        nick     = fromSql uNick,
-        lastSeen = fromSql uLs
-    }
+    =   User { 
+            userId   = fromSql uId,
+            nick     = fromSql uNick,
+            lastSeen = fromSql uLs
+        }

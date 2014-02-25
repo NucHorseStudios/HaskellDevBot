@@ -83,6 +83,7 @@ getFeedData fs
 itemToFeedData :: FeedSource -> FeedItem -> FeedData
 itemToFeedData fs item =
     FeedData {
+        feedItemId      = 0,
         feedItemTitle   = itemTitle item,
         feedItemSource  = fs,
         feedItemPubDate = itemPubDate item,

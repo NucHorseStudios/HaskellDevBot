@@ -70,9 +70,41 @@ botCommands =
 
         BotCommand {
             cmdName     = "!help",
-            cmd         = (\t u c -> privmsgTo c "Commands: !help !uptime \
-                                                 \ !credits !source !say \
-                                                 \ !quit !listfeeds")
+            cmd         = (\t u c 
+                            -> do
+                                let defHelp =   privmsgTo u "Commands: !help !uptime !credits !source !say \
+                                                            \ !quit !listfeeds !admin !notify" >>
+                                                privmsgTo u "!help <command> for help with individual commands"
+
+                                let notifyHelp =    privmsgTo u "Notify on new post." >>
+                                                    privmsgTo u "!notify on 2  -- \
+                                                                \ Starts notifications for feed 2" >>
+                                                    privmsgTo u "!notify off 2 -- \
+                                                                \ Stops notifactions for feed 2" >> 
+                                                    privmsgTo u "You can get feed ids from !listfeeds"
+                                
+                                let adminHelp =     privmsgTo u "Admin Commands:" >>
+                                                    privmsgTo u "!admin add <nick>" >>
+                                                    privmsgTo u "!admin remove <nick>"
+                                        
+                                let msg     = words . drop 6 . clean $ t
+                                
+                                if null msg
+                                then defHelp
+                                else case (msg !! 0) of
+                                    "admin"     -> adminHelp
+                                    "!admin"    -> adminHelp
+
+                                    "notify"    -> notifyHelp
+                                    "!notify"   -> notifyHelp
+
+                                    _           ->  defHelp)
+
+        },
+
+        BotCommand {
+            cmdName     = "!listfeeds",
+            cmd         = (\t u c -> listfeeds c) 
         },
 
         BotCommand {
@@ -95,14 +127,15 @@ botCommands =
                                 let user =  if null msg || length msg < 2
                                             then Nothing 
                                             else Just $ msg !! 1
-
-                                case (user, com) of
-                                     (Just n, Just c) -> 
-                                        case c of 
-                                            "add"    -> addAdminUser n
-                                            "remove" -> removeAdminUser n
-                                            _        -> io $ return ()
-                                     (_,_)           -> io $ return ())
+                                if not admin 
+                                then return ()
+                                else case (user, com) of
+                                            (Just n, Just c) -> 
+                                                case c of 
+                                                    "add"    -> addAdminUser n
+                                                    "remove" -> removeAdminUser n
+                                                    _        -> io $ return ()
+                                            (_,_)            -> io $ return ())
         },
 
         BotCommand {
@@ -125,7 +158,7 @@ botCommands =
                                     (Just c, Just fn) -> 
                                         case c of 
                                             "on"    -> startNotify u fn
-                                            "stop"  -> stopNotify  u fn
+                                            "off"   -> stopNotify  u fn
                                             _       -> io $ return ()
                                     (_,_)           -> io $ return ())
         }
@@ -134,6 +167,7 @@ botCommands =
 
 io :: IO a -> Net a
 io = liftIO
+
 
 main :: IO ()
 main 
@@ -146,6 +180,7 @@ main
         fiveSeconds :: Int
         fiveSeconds = 5 * 1000000
 
+
 startBot :: IO ()
 startBot 
     = do 
@@ -154,6 +189,7 @@ startBot
         where
             disconnect = hClose . socket
             loop st    = catch (runReaderT runBot st) (\(e :: IOException) -> return ()) 
+
 
 connect :: TVar [String] -> IO Bot
 connect mv
@@ -164,27 +200,31 @@ connect mv
         feeds <- getFeeds dbh
 
         hSetBuffering h NoBuffering
-        forkIO $ dispatchMessages h 1000000 mv
-        mapM ((spawnFeedProc dbh) h) feeds
+        mapM (spawnFeedProc dbh) feeds
+        forkIO $ dispatchFeedData dbh mv True  
+        forkIO $ dispatchMessages h oneSecond mv
+
         return (Bot h t mv dbh)
     
     where
+        oneSecond :: Int
+        oneSecond = 1000000
+
+        notify :: IO Bot -> IO Bot
         notify a = bracket_
             ((printf "Connecting to %s ... " server)  >> (hFlush stdout))
             (putStrLn "done.")
             a
 
-        spawnFeedProc :: IConnection c => c -> Handle -> FeedSource -> IO (ThreadId)
-        spawnFeedProc dbh h fs 
-            = do
-                fd <- atomically $ newTVar ([] :: [FeedData]) 
-
-                forkIO $ updateFeed dbh h rt fs fd mv
-            
+        spawnFeedProc :: IConnection c => c -> FeedSource -> IO (ThreadId)
+        spawnFeedProc dbh fs 
+            = do 
+                forkIO $ updateFeed dbh rt fs 
             where
                 rt :: Int
-                rt = (feedRefreshTime fs) * 1000000
+                rt = (feedRefreshTime fs) * oneSecond
     
+
 runBot :: Net ()
 runBot 
     = do
@@ -192,6 +232,7 @@ runBot
         setUser     (botNick++" 0 * :haskelldev bot")
         joinChannel ircChannel
         asks socket >>= listen 
+
 
 listen :: Handle -> Net ()
 listen h 
@@ -205,6 +246,7 @@ listen h
         threeSeconds :: Int
         threeSeconds = 3 * 1000000
 
+
 write :: String -> String -> Net ()
 write s t 
     = do
@@ -213,11 +255,13 @@ write s t
         io $ hPrintf h "%s %s\r\n" s t
         io $ printf    "> %s %s\n" s t
 
+
 addMessage :: TVar [String] -> String-> STM ()
 addMessage mv m
     = do
         msgs <- readTVar mv
         writeTVar mv (m : msgs)
+
 
 popMessages :: TVar [String] -> STM (Maybe String)
 popMessages mv
@@ -228,6 +272,7 @@ popMessages mv
             x  -> do 
                     (writeTVar mv (init x)) 
                     return $ Just (last x)
+
 
 dispatchMessages :: Handle -> Int -> TVar [String] -> IO ()
 dispatchMessages h d mv
@@ -243,10 +288,16 @@ dispatchMessages h d mv
             waitAndRecur :: IO ()
             waitAndRecur = threadDelay d >> dispatchMessages h d mv
 
+
 eval :: String -> Net ThreadId
 eval t 
     = do
-        st <- ask
+        st  <- ask
+        dbh <- asks db
+        ct  <- io $ getCurrentTime
+        
+        io $ addUser_ dbh ircUser (fromEnum $ utcTimeToEpochTime ct)
+        
         if (ping t) then (io $ forkIO $ runReaderT (pong t) st)
         else case (getCommand botCmd) of
             Nothing  -> io $ forkIO $ runReaderT (return ()) st
@@ -263,6 +314,7 @@ eval t
             
             botCmd :: String
             botCmd = if null (words (clean t)) then "" else (words (clean t)) !! 0
+
 
 getCommand :: String -> Maybe BotCommand
 getCommand t 
@@ -292,8 +344,10 @@ isIdentified u
                 then return True 
                 else waitForResp h
 
+
 clean :: String -> String
 clean = drop 1 . unwords . drop 3 . words
+
 
 isAdmin :: String -> Net Bool
 isAdmin u 
@@ -315,6 +369,19 @@ isAdmin u
         isUser :: User -> Bool
         isUser a = ((nick a) == u)
 
+listfeeds :: String -> Net ()
+listfeeds c 
+    = do
+        dbh   <- asks db
+        feeds <- io $ getFeeds dbh
+
+        mapM showFeed feeds
+        return ()
+
+    where 
+        showFeed f = privmsgTo c (msg f)
+        msg f      = (show (feedId f)) ++ ": " ++ (feedName f) ++ " <" ++ (feedUrl f) ++ ">"
+
 removeAdminUser :: String -> Net ()
 removeAdminUser n
     = do
@@ -327,6 +394,7 @@ removeAdminUser n
         else case au of
             Nothing -> io $ return ()
             Just u  -> io $ removeUserFromAccessGroup dbh u (fromJust g)
+
 
 addAdminUser :: String -> Net ()
 addAdminUser n
@@ -346,8 +414,12 @@ stopNotify u fn
         fd  <- io $ getFeed dbh (read fn :: Int) 
 
         case (usr, fd) of
-            (Just usr, Just fd) -> io $ stopNotificationsFor dbh usr fd
+            (Just usr, Just fd) 
+                -> do
+                    io $ stopNotificationsFor dbh usr fd
+                    privmsgTo u ("Stopping notifications for feed: " ++ (feedName fd))
             (_,_)               -> io $ return ()
+
 
 startNotify :: String -> String -> Net ()
 startNotify u fn 
@@ -357,8 +429,12 @@ startNotify u fn
         fd  <- io $ getFeed dbh (read fn :: Int) 
 
         case (usr, fd) of
-            (Just usr, Just fd) -> io $ startNotificationsFor dbh usr fd
+            (Just usr, Just fd) 
+                -> do
+                    io $ startNotificationsFor dbh usr fd
+                    privmsgTo u ("Starting notifications for feed: " ++ (feedName fd))
             (_,_)               -> io $ return ()
+
 
 uptime :: Net String
 uptime 
@@ -366,6 +442,7 @@ uptime
         now  <- io getClockTime
         zero <- asks startTime
         return . prettytime $ diffClockTimes now zero
+
 
 prettytime :: TimeDiff -> String
 prettytime td = 
@@ -378,65 +455,60 @@ prettytime td =
             diffs   = filter ((/= 0) . fst) $ reverse $ snd $
                       foldl' merge (tdSec td, []) metrics
 
-isWithin :: Int -> UTCTime -> UTCTime -> Bool
-isWithin i a b = (fromEnum $  (utcTimeToEpochTime a) - (utcTimeToEpochTime b)) < i
 
 utcTimeToEpochTime :: UTCTime -> EpochTime
 utcTimeToEpochTime = convert
 
-replaceFeedData :: TVar [FeedData] -> [FeedData] -> STM ([FeedData])
-replaceFeedData ftv nd 
-    = do
-        od <- readTVar ftv
-        writeTVar ftv nd
-        return od
 
-updateFeed :: IConnection c => c -> Handle -> Int -> FeedSource -> TVar [FeedData] -> TVar [String] -> IO ()
-updateFeed dbh h d fs fd mv
+updateFeed :: IConnection c => c -> Int -> FeedSource -> IO ()
+updateFeed dbh d fs 
     = do
         nd   <- getFeedData fs
         
         putStrLn $ "Updating Feed: " ++ (feedName fs)
 
         case nd of 
-            Nothing -> putStrLn "Error getting data" >> waitAndRecur  
-            Just d  -> 
-                do  
-                    od <- atomically $ replaceFeedData fd d
-
-                    if null od 
-                    then waitAndRecur
-                    else (writeFeedData dbh h mv (getNewItems od d)) >> waitAndRecur
+            Nothing  -> putStrLn "Error getting data" 
+            Just dt  -> addFeedData dbh dt 
+        
+        waitAndRecur
 
         where
-            getNewItems :: [FeedData] -> [FeedData] -> [FeedData]
-            getNewItems od nd = filter (notOlderThan 3600) (nd \\ od)
-            
-            notOlderThan :: Int -> FeedData -> Bool
-            notOlderThan s a  = (isWithin s ct) (pubDateUTC a)
-
-            ct :: UTCTime
-            ct = (unsafePerformIO getCurrentTime)
-
-            pubDateUTC :: (FeedData -> UTCTime)
-            pubDateUTC = parseToUTC . feedItemPubDate 
-        
-            parseToUTC :: (String -> UTCTime)
-            parseToUTC = (readTime defaultTimeLocale "%a, %d %b %Y %H:%M:%S %z")
-       
             waitAndRecur :: IO ()
-            waitAndRecur = threadDelay d >> updateFeed dbh h d fs fd mv
+            waitAndRecur = threadDelay d >> updateFeed dbh d fs
+
+
+dispatchFeedData :: IConnection c => c -> TVar [String] -> Bool -> IO ()
+dispatchFeedData dbh mv firstRun
+    = do
+        feeds <- getFeeds dbh
+
+        threadDelay tenSeconds
+        mapM (dispatch firstRun) feeds
+        dispatchFeedData dbh mv False
+
+    where
+        dispatch fr fs 
+            = do
+                fd <- getNewFeedData dbh fs
                 
-writeFeedData :: IConnection c => c -> Handle -> TVar [String] -> [FeedData] -> IO [()]
-writeFeedData dbh h mv f 
+                setDataDispatched dbh fd
+                if fr then return [()] else writeFeedData dbh mv fd 
+
+        tenSeconds  = 10 * 1000000
+
+
+writeFeedData :: IConnection c => c -> TVar [String] -> [FeedData] -> IO [()]
+writeFeedData dbh mv f 
     = do
         writeItem `mapM` f
     where 
-        writeItem x = do
-                        usrs <- notifiedUsers dbh (feedItemSource x)
-                        mapM (\u -> (sendTo (nick u) x)) usrs
-                        atomically $ addMessage mv (m ircChannel x)
-                        return ()
+        writeItem x 
+            = do
+                usrs <- notifiedUsers dbh (feedItemSource x)
+
+                mapM (\u -> (sendTo (nick u) x)) usrs
+                sendTo ircChannel x
 
         m  w x      = w ++ " : " ++ name x ++ ": " ++ text x ++ " <" ++ url x ++ ">"
         sendTo w x  = atomically $ addMessage mv (m w x)
@@ -444,23 +516,30 @@ writeFeedData dbh h mv f
         text x      = (feedItemTitle x)
         url  x      = take (39 + (length $ name x)) (feedItemUrl x) 
 
+
 ping :: String -> Bool
 ping x = "PING :" `isPrefixOf` x
+
 
 pong :: String -> Net () 
 pong x = write "PONG" (':' : drop 6 x)
 
+
 setUser :: String -> Net ()
 setUser u = write "USER" u
+
 
 setNick :: String -> Net ()
 setNick n = write "NICK" n
 
+
 joinChannel :: String -> Net ()
 joinChannel ch = write "JOIN" ch
 
+
 privmsg :: String -> Net ()
 privmsg text = privmsgTo ircChannel text
+
 
 privmsgTo :: String -> String -> Net ()
 privmsgTo to text 
