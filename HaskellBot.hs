@@ -80,7 +80,7 @@ botCommands =
                                                     privmsgTo u "!notify on 2  -- \
                                                                 \ Starts notifications for feed 2" >>
                                                     privmsgTo u "!notify off 2 -- \
-                                                                \ Stops notifactions for feed 2" >> 
+                                                                \ Stops notifications for feed 2" >> 
                                                     privmsgTo u "You can get feed ids from !listfeeds"
                                 
                                 let adminHelp =     privmsgTo u "Admin Commands:" >>
@@ -147,7 +147,6 @@ botCommands =
                                 let com =   if null msg
                                             then Nothing
                                             else Just $ msg !! 0
-
                                 let feedn = if null msg || length msg < 2
                                             then Nothing
                                             else Just $ msg !! 1
@@ -161,6 +160,21 @@ botCommands =
                                             "off"   -> stopNotify  u fn
                                             _       -> io $ return ()
                                     (_,_)           -> io $ return ())
+        },
+
+        BotCommand {
+            cmdName     = "!lastseen",
+            cmd         = (\t u c 
+                            -> do
+                                let msg = words . drop 10 . clean $ t
+
+                                let n   =   if null msg
+                                            then Nothing
+                                            else Just $ msg !! 0
+                                case n of 
+                                    Just nck -> (lastseen nck) >>= (privmsgTo c)
+                                    _        -> io $ return ())
+
         }
     ]
 
@@ -381,6 +395,26 @@ listfeeds c
     where 
         showFeed f = privmsgTo c (msg f)
         msg f      = (show (feedId f)) ++ ": " ++ (feedName f) ++ " <" ++ (feedUrl f) ++ ">"
+
+lastseen :: String -> Net String
+lastseen n 
+    = do
+        dbh <- asks db
+        usr <- io $ getUser dbh n
+
+        case usr of 
+            Nothing -> return $ "I don't know " ++ n
+            Just u  
+                -> do
+                    now  <- io $ getClockTime
+                    return $ "I last saw " ++ n ++ " " ++ (prettytime $ diffClockTimes now lsCt) ++ " ago." 
+                where 
+                    lsCt = TOD (toInteger $ lastSeen u) 0
+
+    where
+        parseToUTC :: (String -> UTCTime)
+        parseToUTC = (readTime defaultTimeLocale "%a, %d %b %Y %H:%M:%S %z")
+
 
 removeAdminUser :: String -> Net ()
 removeAdminUser n
