@@ -2,7 +2,7 @@ module BotDB where
 
 import Control.Monad (when)
 import Database.HDBC
-import Database.HDBC.Sqlite3 
+import Database.HDBC.PostgreSQL 
 import Data.List (sort)
 import Data.List.Utils
 import Data.Maybe
@@ -10,10 +10,10 @@ import BotDataTypes
 import BotConfig
 import FeedTypes
 
-connectDb :: FilePath -> IO Connection
-connectDb fp 
+connectDb :: String -> IO Connection
+connectDb cs 
     = do 
-        dbh <- connectSqlite3 fp
+        dbh <- connectPostgreSQL cs
         prepDB dbh
         return dbh
 
@@ -24,8 +24,8 @@ prepDB dbh
         
         when (not ("users" `elem` tables)) $ do 
             run dbh "CREATE TABLE users ( \
-                        \ user_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \ 
-                        \ nick TEXT NOT NULL UNIQUE, \ 
+                        \ user_id SERIAL, \ 
+                        \ nick varchar(20) NOT NULL UNIQUE, \ 
                         \ last_seen INTEGER NOT NULL)" []
 
             run    dbh ("INSERT INTO users (nick, last_seen) values ('" ++ master ++ "', 0)") []
@@ -34,8 +34,8 @@ prepDB dbh
         
         when (not ("access_groups" `elem` tables)) $ do
             run dbh "CREATE TABLE access_groups ( \
-                        \ access_group_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \   
-                        \ name TEXT NOT NULL UNIQUE)" []
+                        \ access_group_id SERIAL, \   
+                        \ name varchar(20) NOT NULL UNIQUE)" []
 
             run    dbh "INSERT INTO access_groups (name) values ('admin')" []
             run    dbh "INSERT INTO access_groups (name) values ('friend')" []
@@ -44,10 +44,10 @@ prepDB dbh
 
         when (not ("user_access_groups" `elem` tables)) $ do
             run dbh "CREATE TABLE user_access_groups ( \
-                        \ user_access_group_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \
+                        \ user_access_group_id SERIAL, \
                         \ user_id INTEGER NOT NULL, \
                         \ access_group_id INTEGER NOT NULL, \
-                        \ UNIQUE (user_id, access_group_id) ON CONFLICT IGNORE)" []
+                        \ UNIQUE (user_id, access_group_id))" []
 
             run    dbh "INSERT INTO user_access_groups (user_id, access_group_id) VALUES (1, 1)" []
 
@@ -55,8 +55,8 @@ prepDB dbh
 
         when (not ("feedsources" `elem` tables)) $ do
             run dbh "CREATE TABLE feedsources ( \
-                        \ feed_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \
-                        \ name TEXT NOT NULL UNIQUE, \
+                        \ feed_id SERIAL, \
+                        \ name varchar(120) NOT NULL UNIQUE, \
                         \ refresh_time INTEGER NOT NULL, \
                         \ url TEXT NOT NULL)" []
             
@@ -76,23 +76,22 @@ prepDB dbh
 
         when (not ("feed_data" `elem` tables)) $ do
             run dbh "CREATE TABLE feed_data ( \
-                        \ data_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \
-                        \ title TEXT, \
-                        \ pub_date TEXT, \
+                        \ data_id SERIAL, \
+                        \ title varchar(500), \
+                        \ pub_date varchar(150), \
                         \ feedsource_id INTEGER NOT NULL, \
                         \ post_text TEXT, \
                         \ url TEXT UNIQUE, \
                         \ dispatched INTEGER DEFAULT 0, \
-                        \ UNIQUE (title, pub_date, feedsource_id, url) ON CONFLICT IGNORE)" []
+                        \ UNIQUE (title, pub_date, feedsource_id, url))" []
             return ()
 
         when (not ("feedpost_notifications" `elem` tables)) $ do
             run dbh " CREATE TABLE feedpost_notifications ( \
-                        \ notification_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \
+                        \ notification_id SERIAL, \
                         \ feed_id INTEGER NOT NULL, \
                         \ user_id INTEGER NOT NULL, \
-                        \ UNIQUE (feed_id, user_id) ON CONFLICT REPLACE)" []
-
+                        \ UNIQUE (feed_id, user_id))" []
             return ()
 
         commit dbh
@@ -106,7 +105,7 @@ addUser dbh u ls
             Nothing ->  handleSql errorHandler $ run dbh insertQuery [toSql u, toSql ls]
             _       ->  handleSql errorHandler $ run dbh updateQuery [toSql ls, toSql u]
         commit dbh 
-        getUser dbh u
+        getUser dbh u 
     where 
         errorHandler e  = (fail $ failMessage e)
         failMessage  e  = "Error adding user"  ++ ": " ++ show e 
@@ -163,15 +162,33 @@ getGroupByName dbh gn
     where 
         selectQuery = "SELECT access_group_id, name FROM access_groups WHERE name = ?"
 
+
 addFeedData :: IConnection c => c -> [FeedData] -> IO ()
 addFeedData dbh fd 
     = do
         mapM insertData fd
         commit dbh
     where
-        insertData d = runQuery (feedItemTitle d) (feedItemPubDate d) (feedId (feedItemSource d)) (feedItemUrl d)
-        insertQuery = "INSERT INTO feed_data (title, pub_date, feedsource_id, url) VALUES(?, ?, ?, ?)"
+        insertData d 
+            = do
+                hfd <- hasFeedData dbh d
+                if not hfd 
+                then runQuery (feedItemTitle d) (feedItemPubDate d) (feedId (feedItemSource d)) (feedItemUrl d)
+                else return 0
+
+        insertQuery          = "INSERT INTO feed_data (title, pub_date, feedsource_id, url) VALUES(?, ?, ?, ?)"
         runQuery t pd fsid u = run dbh insertQuery [toSql t, toSql pd, toSql fsid, toSql u]
+
+hasFeedData :: IConnection c => c -> FeedData -> IO Bool
+hasFeedData dbh fd 
+    = do
+        r <- quickQuery' dbh selectQuery [toSql (feedItemUrl fd)]
+        
+        case r of 
+            [] -> return False
+            _  -> return True
+    where 
+        selectQuery = "SELECT data_id FROM feed_data WHERE url=?"
 
 getNewFeedData :: IConnection c => c -> FeedSource -> IO ([FeedData])
 getNewFeedData dbh fs
@@ -185,10 +202,14 @@ getNewFeedData dbh fs
 setDataDispatched :: IConnection c => c -> [FeedData] -> IO ()
 setDataDispatched dbh fd
     = do
-        run dbh updateQuery []
-        commit dbh
+        case fd of 
+            [] -> return ()
+            _  -> (run dbh updateQuery [] >> commit dbh)
     where
-        updateQuery = "UPDATE feed_data SET dispatched = 1 WHERE data_id IN (" ++ (join ", " ids) ++ ")"
+        updateQuery = "UPDATE feed_data \
+                        \ SET dispatched = 1 \
+                        \ WHERE data_id IN \
+                        \ (" ++ (join ", " ids) ++ ")"
         ids         = map feedId fd
         feedId d    = show (feedItemId d)
         
@@ -213,6 +234,18 @@ removeUserFromAccessGroup dbh u g
     where 
         removeQuery      = "DELETE FROM user_access_groups WHERE user_id = ? AND access_group_id = ?"
         runQuery uid gid = run dbh removeQuery [toSql uid, toSql gid]
+
+getNotificationStatus :: IConnection c => c -> User -> FeedSource -> IO Bool
+getNotificationStatus dbh u f 
+    = do
+        r <- quickQuery' dbh selectQuery [toSql (userId u), toSql (feedId f)]
+
+        case r of 
+            [] -> return False;
+            _  -> return True;
+    where
+        selectQuery = "SELECT notification_id FROM feedpost_notifications WHERE user_id = ? AND feed_id = ?"
+
 
 startNotificationsFor :: IConnection c => c -> User -> FeedSource -> IO ()
 startNotificationsFor dbh u fs 

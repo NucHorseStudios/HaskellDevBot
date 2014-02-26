@@ -5,7 +5,7 @@ import System.IO
 import System.Time  
 import Control.Concurrent.STM
 import Database.HDBC
-import Database.HDBC.Sqlite3 
+import Database.HDBC.PostgreSQL
 
 type Net = ReaderT Bot IO
 

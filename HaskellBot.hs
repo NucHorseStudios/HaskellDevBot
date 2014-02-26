@@ -31,7 +31,7 @@ import Data.Time.Clock (UTCTime(..))
 import FeedTypes
 import FeedParser
 import Database.HDBC
-import Database.HDBC.Sqlite3 
+import Database.HDBC.PostgreSQL 
 import BotDataTypes
 import BotDB
 import BotConfig
@@ -73,19 +73,26 @@ botCommands =
             cmd         = (\t u c 
                             -> do
                                 let defHelp =   privmsgTo u "Commands: !help !uptime !credits !source !say \
-                                                            \ !quit !listfeeds !admin !notify" >>
-                                                privmsgTo u "!help <command> for help with individual commands"
+                                                            \ !quit !listfeeds !admin !notify !lastseen" >>
+                                                privmsgTo u "!help <command> for help with individual commands" >>
+                                                privmsgTo u "Exmaple: !help notify"
+
+                                let lsHelp     =    privmsgTo u "!lastseen <nick>" >>
+                                                    privmsgTo u "Example: !lastseen DrAwesomeClaws"
 
                                 let notifyHelp =    privmsgTo u "Notify on new post." >>
-                                                    privmsgTo u "!notify on 2  -- \
-                                                                \ Starts notifications for feed 2" >>
-                                                    privmsgTo u "!notify off 2 -- \
-                                                                \ Stops notifications for feed 2" >> 
+                                                    privmsgTo u "!notify on <Feed id>  -- \
+                                                                \ Starts notifications for a feed" >>
+                                                    privmsgTo u "!notify off <Feed id> -- \
+                                                                \ Stops notifications for a feed" >> 
+                                                    privmsgTo u "Example: !notify on 2" >>
                                                     privmsgTo u "You can get feed ids from !listfeeds"
                                 
-                                let adminHelp =     privmsgTo u "Admin Commands:" >>
+                                let adminHelp =     privmsgTo u "Admin Commands" >>
+                                                    privmsgTo u "Must already be an administrator" >>
                                                     privmsgTo u "!admin add <nick>" >>
-                                                    privmsgTo u "!admin remove <nick>"
+                                                    privmsgTo u "!admin remove <nick>" >>
+                                                    privmsgTo u "Example: !admin add DrAwesomeClaws"
                                         
                                 let msg     = words . drop 6 . clean $ t
                                 
@@ -97,6 +104,9 @@ botCommands =
 
                                     "notify"    -> notifyHelp
                                     "!notify"   -> notifyHelp
+
+                                    "lastseen"  -> lsHelp
+                                    "!lastseen" -> lsHelp
 
                                     _           ->  defHelp)
 
@@ -189,7 +199,7 @@ main
         forever $ catch startBot onError 
     where
         onError :: IOException -> IO ()
-        onError e = (threadDelay fiveSeconds) >> return ()
+        onError e   = (threadDelay fiveSeconds) >> return ()
 
         fiveSeconds :: Int
         fiveSeconds = 5 * 1000000
@@ -210,7 +220,7 @@ connect mv
     = notify $ do
         h     <- connectTo server $ PortNumber $ fromIntegral port
         t     <- getClockTime
-        dbh   <- connectDb "haskellbot.db"
+        dbh   <- connectDb dbs
         feeds <- getFeeds dbh
 
         hSetBuffering h NoBuffering
@@ -223,6 +233,9 @@ connect mv
     where
         oneSecond :: Int
         oneSecond = 1000000
+        
+        dbs :: String
+        dbs = "host=localhost dbname=" ++ dbName ++ " user=" ++ (map toLower botNick) ++ " password="
 
         notify :: IO Bot -> IO Bot
         notify a = bracket_
@@ -465,9 +478,14 @@ startNotify u fn
         case (usr, fd) of
             (Just usr, Just fd) 
                 -> do
-                    io $ startNotificationsFor dbh usr fd
-                    privmsgTo u ("Starting notifications for feed: " ++ (feedName fd))
-            (_,_)               -> io $ return ()
+                    r <- io $ getNotificationStatus dbh usr fd
+
+                    case r of 
+                        False -> (io $ startNotificationsFor dbh usr fd) >>
+                                 (privmsgTo u ("Starting notifications for feed: " ++ (feedName fd)))
+                        True  -> (privmsgTo u ("You are already being notified for that feed."))
+            
+            _   -> io $ return ()
 
 
 uptime :: Net String

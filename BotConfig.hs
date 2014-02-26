@@ -2,9 +2,9 @@ module BotConfig where
 
 import FeedTypes
 
-server      = "banks.freenode.net"
+server      = "irc.freenode.net"
 port        = 6667
 ircChannel  = "##hb-testing"
-botNick     = "GamedevBotTT"
+botNick     = "HaskelldevBot"
 master      = "DrAwesomeClaws"
-
+dbName      = "haskellbotdb"
