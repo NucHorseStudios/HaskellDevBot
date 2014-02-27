@@ -173,11 +173,12 @@ addFeedData dbh fd
             = do
                 hfd <- hasFeedData dbh d
                 if not hfd 
-                then runQuery (feedItemTitle d) (feedItemPubDate d) (feedId (feedItemSource d)) (feedItemUrl d)
+                then runQuery (feedItemTitle d) (feedItemPubDate d) (feedItemText d) (feedId (feedItemSource d)) (feedItemUrl d)
                 else return 0
 
-        insertQuery          = "INSERT INTO feed_data (title, pub_date, feedsource_id, url) VALUES(?, ?, ?, ?)"
-        runQuery t pd fsid u = run dbh insertQuery [toSql t, toSql pd, toSql fsid, toSql u]
+        insertQuery = "INSERT INTO feed_data (title, pub_date, post_text, feedsource_id, url) \
+                        \ VALUES (?, ?, ?, ?, ?)"
+        runQuery t pd txt fsid u = run dbh insertQuery [toSql t, toSql pd, toSql txt, toSql fsid, toSql u]
 
 hasFeedData :: IConnection c => c -> FeedData -> IO Bool
 hasFeedData dbh fd 
@@ -190,13 +191,32 @@ hasFeedData dbh fd
     where 
         selectQuery = "SELECT data_id FROM feed_data WHERE url=?"
 
+getFeedDataById :: IConnection c => c -> Int -> IO (Maybe FeedData)
+getFeedDataById dbh id 
+    = do
+        r <- quickQuery' dbh selectQuery [toSql id]
+        
+        case r of 
+            []      -> return Nothing
+            (x:xs)  -> toFeedData x 
+    where 
+        toFeedData [id, t, pd, fsid, txt, u] 
+            = do
+                fs <- getFeed dbh (fromSql fsid)
+                case fs of 
+                    Just fs -> return $ Just $ convertToFeedData fs [id, t, pd, txt, u]
+                    Nothing -> return $ Nothing
+        
+        selectQuery = "SELECT data_id, title, pub_date, feedsource_id, post_text, url \
+                        \ FROM feed_data WHERE data_id = ?"
+
 getNewFeedData :: IConnection c => c -> FeedSource -> IO ([FeedData])
 getNewFeedData dbh fs
     = do 
         nd  <- quickQuery' dbh selectQuery [toSql (feedId fs)] 
         return $ map (convertToFeedData fs) nd
     where
-        selectQuery = "SELECT data_id, title, pub_date, url \
+        selectQuery = "SELECT data_id, title, pub_date, post_text, url \
                         \ FROM feed_data WHERE dispatched=0 AND feedsource_id = ?"
         
 setDataDispatched :: IConnection c => c -> [FeedData] -> IO ()
@@ -311,11 +331,12 @@ convertToFeedSource [fId, fn, rt, u]
             feedUrl = fromSql u
         }
 
-convertToFeedData fs [fdId, fdTitle, fdPd, fdUrl]
+convertToFeedData fs [fdId, fdTitle, fdPd, fdTxt, fdUrl]
     =   FeedData {
             feedItemId      = fromSql fdId,
             feedItemTitle   = fromSql fdTitle,
             feedItemPubDate = fromSql fdPd,
+            feedItemText    = fromSql fdTxt,
             feedItemSource  = fs,
             feedItemUrl     = fromSql fdUrl
         }

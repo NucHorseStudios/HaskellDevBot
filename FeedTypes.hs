@@ -14,6 +14,7 @@ data FeedData =
         feedItemId      :: Integer,
         feedItemTitle   :: String,
         feedItemPubDate :: String,
+        feedItemText    :: String,
         feedItemSource  :: FeedSource,
         feedItemUrl     :: String
     }

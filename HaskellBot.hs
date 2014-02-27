@@ -123,6 +123,25 @@ botCommands =
         },
 
         BotCommand {
+            cmdName     = "!text",
+            cmd         = (\t u c 
+                            -> do
+                                dbh <- asks db
+                                let msg = words . drop 6 . clean $ t
+                                let pid = if null msg then Nothing else Just $ msg !! 0
+                                
+                                
+                                case pid of 
+                                    Just id 
+                                        -> do
+                                            fd <- io $ getFeedDataById dbh (read id :: Int)
+                                            case fd of 
+                                                Just fd -> msgChunks c (feedItemText fd)
+                                                _       -> io $ return ()
+                                    _       -> io $ return ())
+        },
+
+        BotCommand {
             cmdName     = "!admin",
             cmd         = (\t u c
                             -> do
@@ -188,6 +207,9 @@ botCommands =
         }
     ]
 
+msgChunks :: String -> String -> Net ()
+msgChunks c [] = return ()
+msgChunks c x  = privmsgTo c (take 400 x)  >> msgChunks c (drop 400 x)
 
 io :: IO a -> Net a
 io = liftIO
@@ -396,6 +418,7 @@ isAdmin u
         isUser :: User -> Bool
         isUser a = ((nick a) == u)
 
+
 listfeeds :: String -> Net ()
 listfeeds c 
     = do
@@ -408,6 +431,7 @@ listfeeds c
     where 
         showFeed f = privmsgTo c (msg f)
         msg f      = (show (feedId f)) ++ ": " ++ (feedName f) ++ " <" ++ (feedUrl f) ++ ">"
+
 
 lastseen :: String -> Net String
 lastseen n 
@@ -465,7 +489,7 @@ stopNotify u fn
                 -> do
                     io $ stopNotificationsFor dbh usr fd
                     privmsgTo u ("Stopping notifications for feed: " ++ (feedName fd))
-            (_,_)               -> io $ return ()
+            _   -> io $ return ()
 
 
 startNotify :: String -> String -> Net ()
@@ -562,11 +586,12 @@ writeFeedData dbh mv f
                 mapM (\u -> (sendTo (nick u) x)) usrs
                 sendTo ircChannel x
 
-        m  w x      = w ++ " : " ++ name x ++ ": " ++ text x ++ " <" ++ url x ++ ">"
+        m  w x      = w ++ " : " ++ name x ++ ": " ++ text x ++ " <" ++ url x ++ ">" ++ " [" ++ id x ++ "]"
         sendTo w x  = atomically $ addMessage mv (m w x)
         name x      = (feedName (feedItemSource x))
         text x      = (feedItemTitle x)
         url  x      = take (39 + (length $ name x)) (feedItemUrl x) 
+        id   x      = (show (feedItemId x))
 
 
 ping :: String -> Bool

@@ -7,6 +7,11 @@ import Text.XML.HaXml.Posn
 import Text.XML.HaXml.Html.Generate(showattr)
 import Data.Char
 import Data.List
+import Data.List.Split 
+import Data.List.Utils 
+import Data.String.Utils
+
+import System.IO.Unsafe
 
 import Control.Monad.Reader     
 import Control.Exception  
@@ -16,9 +21,10 @@ import Data.Maybe
 
 
 data FeedItem =
-     FeedItem {     
+     FeedItem { 
         itemTitle   :: String,
         itemPubDate :: String,
+        itemText    :: String,
         itemUrl     :: String
      }
      deriving (Eq, Show, Read)
@@ -87,6 +93,7 @@ itemToFeedData fs item =
         feedItemTitle   = itemTitle item,
         feedItemSource  = fs,
         feedItemPubDate = itemPubDate item,
+        feedItemText    = itemText item,
         feedItemUrl     = itemUrl item  
     }
 
@@ -120,13 +127,31 @@ getEnclosures doc =
              FeedItem {
                 itemTitle   = title,
                 itemUrl     = link,
+                itemText    = text,
                 itemPubDate = pubDate
             }
             where 
                 title   = contentToStringDefault "Untitled FeedData"
                           (keep /> tag "title" /> txt $ item)
                 link    = contentToString (keep /> tag "guid"  /> txt $ item)
+                text    = removeHtmlDumb $ contentToString (keep /> tag "description" /> txt $ item)
                 pubDate = contentToString (keep /> tag "pubDate" /> txt $ item)
+
+removeHtmlDumb :: String -> String
+removeHtmlDumb s 
+    = do  
+        unwords (mapMaybe dropTag (splitOn "<" s))
+    where
+        dropTag :: String -> Maybe String
+        dropTag n 
+            = do 
+                case raw of
+                    [] -> Nothing
+                    _  -> Just raw
+            where 
+                raw = strip $ drop 1 (dropWhile (/= '>') n)
+
+
 
 contentToStringDefault msg [] = msg
 contentToStringDefault _   x  = contentToString x
