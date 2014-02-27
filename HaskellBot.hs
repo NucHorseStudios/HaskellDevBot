@@ -136,7 +136,7 @@ botCommands =
                                         -> do
                                             fd <- io $ getFeedDataById dbh (read id :: Int)
                                             case fd of 
-                                                Just fd -> msgChunks c (feedItemText fd)
+                                                Just fd -> msgChunks u (feedItemText fd)
                                                 _       -> io $ return ()
                                     _       -> io $ return ())
         },
