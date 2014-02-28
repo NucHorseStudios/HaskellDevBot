@@ -316,6 +316,7 @@ popMessages :: TVar [String] -> STM (Maybe String)
 popMessages mv
     = do
         m <- readTVar mv
+
         case m of
             [] -> return Nothing
             x  -> do 
@@ -327,9 +328,11 @@ dispatchMessages :: Handle -> Int -> TVar [String] -> IO ()
 dispatchMessages h d mv
     =  do  
         m <- atomically $ popMessages mv
+        
         case m of
             Nothing ->   waitAndRecur
             Just x  ->   hPutStrLn h (msg x) >> putStrLn (msg x) >> waitAndRecur
+        
         where
             msg :: String -> String
             msg x        = "PRIVMSG " ++ x 
@@ -351,6 +354,7 @@ eval t
         else case (getCommand botCmd) of
             Nothing  -> io $ forkIO $ runReaderT (return ()) st
             Just bc  -> io $ forkIO $ runReaderT ((cmd bc) t ircUser chan) st 
+        
         where
             parseIrcCmd :: [String]
             parseIrcCmd = words t
@@ -371,6 +375,7 @@ getCommand t
         case (filter (isCmd t) botCommands) of 
             []      -> Nothing 
             (x:xs)  -> Just x 
+    
     where 
         isCmd t bc = if (t == (cmdName bc)) then True else False
 
@@ -380,9 +385,11 @@ isIdentified u
     = do
         h  <- asks socket 
         r  <- io $ timeout fiveSeconds (waitForResp h)
+        
         case r of 
             Nothing  -> return False
             Just x   -> return x 
+    
     where 
         fiveSeconds = 5 * 1000000
         waitForResp h
@@ -444,7 +451,9 @@ lastseen n
             Just u  
                 -> do
                     now  <- io $ getClockTime
+                    
                     return $ "I last saw " ++ n ++ " " ++ (prettytime $ diffClockTimes now lsCt) ++ " ago." 
+                
                 where 
                     lsCt = TOD (toInteger $ lastSeen u) 0
 
@@ -567,11 +576,16 @@ dispatchFeedData dbh mv firstRun
         dispatch fr fs 
             = do
                 fd <- getNewFeedData dbh fs
+                ct <- getCurrentTime
                 
                 setDataDispatched dbh fd
-                if fr then return [()] else writeFeedData dbh mv fd 
-
-        tenSeconds  = 10 * 1000000
+                if fr then return [()] else writeFeedData dbh mv (filter (notOlderThan 3600 ct) fd) 
+        
+        notOlderThan s ct d = ((epoch ct) - (postEpoch d)) < s 
+        postEpoch d         = epoch (localTimeToUTC utc  (rddtToLt d))
+        epoch               = fromEnum . utcTimeToEpochTime 
+        rddtToLt d          = fst $ fromJust $ strptime "%a, %Od %b %Y %OH:%OM:%OS %z" (feedItemPubDate d)
+        tenSeconds          = 10 * 1000000
 
 
 writeFeedData :: IConnection c => c -> TVar [String] -> [FeedData] -> IO [()]
